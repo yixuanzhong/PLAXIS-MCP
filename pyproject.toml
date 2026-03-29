@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaxis-mcp"
+version = "0.1.0"
+description = "MCP server for interacting with PLAXIS via the PLAXIS Remote Scripting API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Yixuan Zhong" }
+]
+dependencies = [
+  "mcp[cli]>=1.24.0,<2.0.0",
+  "plxscripting>=1.0.4,<2.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/yixuanzhong/PLAXIS-MCP"
+
+[project.scripts]
+plaxis-mcp = "plaxis_mcp.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
