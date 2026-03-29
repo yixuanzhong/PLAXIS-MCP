@@ -1,0 +1,12 @@
+services:
+  plaxis-mcp:
+    build:
+      context: .
+    image: plaxis-mcp:latest
+    environment:
+      PLAXIS_HOST: host.docker.internal
+      PLAXIS_PORT: "10000"
+      PLAXIS_PASSWORD: ""
+    stdin_open: true
+    tty: true
+

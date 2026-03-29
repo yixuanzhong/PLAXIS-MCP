@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "plaxis-mcp": {
+      "command": "python",
+      "args": ["-m", "plaxis_mcp.server"],
+      "env": {
+        "PLAXIS_HOST": "127.0.0.1",
+        "PLAXIS_PORT": "10000",
+        "PLAXIS_PASSWORD": ""
+      }
+    },
+    "plaxis-mcp-docker": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "PLAXIS_HOST=host.docker.internal", "-e", "PLAXIS_PORT=10000", "plaxis-mcp:latest"]
+    }
+  }
+}
+
