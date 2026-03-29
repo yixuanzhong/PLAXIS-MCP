@@ -158,3 +158,9 @@ server and then use tools like:
 
 - [`cemsbv/plxscripting`](https://github.com/cemsbv/plxscripting)
 - [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+
+## Trademark Notice
+
+PLAXIS is a trademark of Seequent and related companies. This project is an
+independent integration and is not affiliated with, endorsed by, or sponsored
+by Seequent or Bentley Systems.
