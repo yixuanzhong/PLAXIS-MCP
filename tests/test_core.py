@@ -8,6 +8,13 @@ class FakeProperty:
         self.value = value
 
 
+class FakePhase:
+    def __init__(self, name, identification=None):
+        self.Name = FakeProperty(name)
+        self.Identification = FakeProperty(identification or name)
+        self.TypeName = FakeProperty("Phase")
+
+
 class FakeProxy:
     def __init__(self):
         self._guid = "guid-1"
@@ -27,7 +34,7 @@ class FakeProxy:
 
 class FakeRoot:
     def __init__(self):
-        self.Phases = [FakeProperty("Phase_1"), FakeProperty("Phase_2")]
+        self.Phases = [FakePhase("Phase_1"), FakePhase("Phase_2")]
         self.Soil_1 = FakeProxy()
         self.Materials = [FakeProxy()]
         self.ProjectTitle = FakeProperty("Demo")
@@ -36,12 +43,26 @@ class FakeRoot:
         self.UnitForce = FakeProperty("kN")
         self.UnitLength = FakeProperty("m")
         self.UnitTime = FakeProperty("day")
+        self.ResultTypes = FakeResultTypes()
 
     def save(self):
         return True
 
     def saveas(self, filename):
         return filename
+
+    def getresults(self, phase, result_type, fem_type):
+        return [phase.Name.value, result_type, fem_type]
+
+
+class FakeResultTypesSoil:
+    def __init__(self):
+        self.Utot = "Soil.Utot"
+
+
+class FakeResultTypes:
+    def __init__(self):
+        self.Soil = FakeResultTypesSoil()
 
 
 class FakeServer:
@@ -101,6 +122,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(session.list_phases()["count"], 2)
         self.assertEqual(session.list_materials()["count"], 1)
         self.assertEqual(session.project_info()["project_title"], "Demo")
+
+    def test_output_helpers(self):
+        session = PlaxisSession()
+        session._server = FakeServer()
+        session._global = FakeRoot()
+
+        result_types = session.list_result_types()
+        self.assertIn("Soil", result_types["members"])
+
+        results = session.get_results(1, "ResultTypes.Soil.Utot", "node")
+        self.assertEqual(results["fem_type"], "node")
+        self.assertEqual(results["count"], 3)
 
 
 if __name__ == "__main__":
