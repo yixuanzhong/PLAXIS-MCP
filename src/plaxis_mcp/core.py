@@ -82,6 +82,26 @@ def resolve_path(root: Any, path: str) -> Any:
     return value
 
 
+def _resolve_phase(global_object: Any, phase_identifier: int | str | None) -> Any:
+    if phase_identifier is None:
+        raise ValueError("A phase identifier is required.")
+    if isinstance(phase_identifier, int):
+        return global_object.Phases[phase_identifier]
+    if isinstance(phase_identifier, str) and phase_identifier.isdigit():
+        return global_object.Phases[int(phase_identifier)]
+    if isinstance(phase_identifier, str):
+        try:
+            return getattr(global_object, phase_identifier)
+        except Exception:
+            pass
+        for phase in global_object.Phases:
+            if _read_member_value(phase, "Name") == phase_identifier:
+                return phase
+            if _read_member_value(phase, "Identification") == phase_identifier:
+                return phase
+    raise ValueError(f"Unable to resolve phase '{phase_identifier}'.")
+
+
 def _read_member_value(obj: Any, attr_name: str) -> Any:
     try:
         member = getattr(obj, attr_name)
@@ -358,3 +378,39 @@ class PlaxisSession:
             "unit_time": _read_member_value(global_object, "UnitTime"),
         }
         return info
+
+    def get_results(
+        self,
+        phase: int | str,
+        result_type_path: str,
+        fem_type: str = "node",
+    ) -> dict[str, Any]:
+        global_object = self.require_global()
+        phase_object = _resolve_phase(global_object, phase)
+        result_type = resolve_path(global_object, result_type_path)
+        getresults = getattr(global_object, "getresults", None)
+        if getresults is None or not callable(getresults):
+            raise ValueError(
+                "Connected PLAXIS environment does not expose 'getresults'. "
+                "Use an Output scripting server for result extraction."
+            )
+
+        results = getresults(phase_object, result_type, fem_type)
+        serialized = serialize_value(results, max_items=200)
+        count = len(results) if hasattr(results, "__len__") else None
+        return {
+            "phase": serialize_value(phase_object),
+            "result_type_path": result_type_path,
+            "fem_type": fem_type,
+            "count": count,
+            "results": serialized,
+        }
+
+    def list_result_types(self, path: str = "ResultTypes") -> dict[str, Any]:
+        result_root = resolve_path(self.require_global(), path)
+        members = _safe_dir(result_root)
+        return {
+            "path": path,
+            "members": members,
+            "summary": serialize_value(result_root),
+        }

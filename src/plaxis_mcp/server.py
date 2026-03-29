@@ -120,6 +120,18 @@ def project_info() -> dict[str, Any]:
     return session.project_info()
 
 
+@mcp.tool()
+def list_result_types(path: str = "ResultTypes") -> dict[str, Any]:
+    """List available PLAXIS result type groups or members, typically in Output mode."""
+    return session.list_result_types(path)
+
+
+@mcp.tool()
+def get_results(phase: int | str, result_type_path: str, fem_type: str = "node") -> dict[str, Any]:
+    """Fetch PLAXIS Output results using the upstream getresults(phase, result_type, fem_type) API shape."""
+    return session.get_results(phase, result_type_path, fem_type)
+
+
 def main() -> None:
     transport = os.getenv("PLAXIS_MCP_TRANSPORT", "stdio")
     mcp.run(transport=transport)

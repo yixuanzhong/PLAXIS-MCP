@@ -92,6 +92,8 @@ Optional environment variables:
 - `project_info`
 - `list_phases`
 - `list_materials`
+- `list_result_types`
+- `get_results`
 - `list_members`
 - `inspect`
 - `set_property`
@@ -135,6 +137,22 @@ Run the unit tests:
 ```bash
 python -m unittest discover -s tests
 ```
+
+Run a local smoke test:
+
+```bash
+python scripts/smoke_test.py
+```
+
+The smoke test is diagnostic rather than strict: it reports whether the `mcp`
+SDK and `plxscripting` are importable in the current environment, and it exits
+successfully even when those runtime dependencies are missing.
+
+For PLAXIS Output result extraction, connect this MCP to an Output scripting
+server and then use tools like:
+
+- `list_result_types("ResultTypes")`
+- `get_results(phase=0, result_type_path="ResultTypes.Soil.Utot", fem_type="node")`
 
 ## References
 
