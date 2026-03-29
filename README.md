@@ -43,6 +43,12 @@ That path pattern comes from the upstream `plxscripting` README.
 pip install -e .
 ```
 
+Or build a container image:
+
+```bash
+docker build -t plaxis-mcp .
+```
+
 ## Running
 
 By default the server uses stdio transport:
@@ -50,6 +56,18 @@ By default the server uses stdio transport:
 ```bash
 python -m plaxis_mcp.server
 ```
+
+With Docker:
+
+```bash
+docker run -i --rm \
+  -e PLAXIS_HOST=host.docker.internal \
+  -e PLAXIS_PORT=10000 \
+  plaxis-mcp
+```
+
+Note: the container only runs the MCP server. PLAXIS still needs to run on the
+Windows host with Remote Scripting enabled and reachable from the container.
 
 Optional environment variables:
 
@@ -90,6 +108,9 @@ Paths use dotted access with optional list indexes:
 An empty path refers to the PLAXIS global object.
 
 ## Example MCP Client Config
+
+See [examples/mcp-client-config.json](examples/mcp-client-config.json) for a
+copy-pasteable client config covering both direct Python and Docker usage.
 
 ```json
 {
