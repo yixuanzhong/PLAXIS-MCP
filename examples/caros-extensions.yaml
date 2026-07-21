@@ -1,0 +1,69 @@
+# Add under the `extensions` key in Caros config.yaml. Replace <YOU> with the
+# Windows account that ran the PLAXIS-MCP installer.
+#
+# Both entries launch the same signed executable; the profile decides the role,
+# the endpoint, and which installation's password is read from Windows
+# Credential Manager. No password appears here and no PLAXIS_* variable is set --
+# `serve --config` refuses to start if any PLAXIS endpoint environment override
+# is present.
+#
+# Generate the profiles and store the passwords first:
+#   plaxis-mcp.exe profiles --output-dir "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles"
+#   plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\input.toml"
+#   plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\output.toml"
+#
+# Set GOOSE_MODE=smart_approve for the Caros process itself; it is not an
+# extension variable. Every mutator below must stay on Ask Before. Client
+# approval is the only barrier: neither an approval prompt nor a Caros
+# checkpoint can restore PLAXIS state, so work on disposable projects.
+extensions:
+  plaxis_input:
+    enabled: true
+    type: stdio
+    name: PLAXIS Input
+    description: Local PLAXIS Input Remote Scripting MCP server
+    cmd: 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\plaxis-mcp.exe'
+    args:
+      - serve
+      - --config
+      - 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\profiles\input.toml'
+    timeout: 300
+    available_tools:
+      - connect
+      - disconnect
+      - connection_status
+      - list_members
+      - inspect
+      - project_info
+      - list_phases
+      - list_materials
+      - set_property
+      - call_method
+      - new_project
+      - open_project
+      - close_project
+      - recover_project
+      - save_project
+
+  plaxis_output:
+    enabled: true
+    type: stdio
+    name: PLAXIS Output
+    description: Local PLAXIS Output Remote Scripting MCP server
+    cmd: 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\plaxis-mcp.exe'
+    args:
+      - serve
+      - --config
+      - 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\profiles\output.toml'
+    timeout: 300
+    available_tools:
+      - connect
+      - disconnect
+      - connection_status
+      - list_members
+      - inspect
+      - project_info
+      - list_phases
+      - list_materials
+      - list_result_types
+      - get_results

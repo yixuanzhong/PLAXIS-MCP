@@ -1,18 +1,30 @@
 {
+  "_comment": [
+    "Generic stdio MCP client shape. Not every client uses this `mcpServers`",
+    "key -- see the client-specific examples in this directory (VS Code uses",
+    "`servers`, Codex uses `mcp_servers` TOML sections, Caros uses `extensions`",
+    "in config.yaml).",
+    "Replace <YOU> with the Windows account that ran the PLAXIS-MCP installer.",
+    "No password appears here: the profile names a Windows Credential Manager",
+    "target, and `serve --config` refuses to start if any PLAXIS_* endpoint",
+    "environment override is set."
+  ],
   "mcpServers": {
-    "plaxis-mcp": {
-      "command": "python",
-      "args": ["-m", "plaxis_mcp.server"],
-      "env": {
-        "PLAXIS_HOST": "127.0.0.1",
-        "PLAXIS_PORT": "10000",
-        "PLAXIS_PASSWORD": ""
-      }
+    "plaxis-input": {
+      "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
+      "args": [
+        "serve",
+        "--config",
+        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\input.toml"
+      ]
     },
-    "plaxis-mcp-docker": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "PLAXIS_HOST=host.docker.internal", "-e", "PLAXIS_PORT=10000", "plaxis-mcp:latest"]
+    "plaxis-output": {
+      "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
+      "args": [
+        "serve",
+        "--config",
+        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\output.toml"
+      ]
     }
   }
 }
-

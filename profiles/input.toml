@@ -1,0 +1,27 @@
+# Template only. Do not edit by hand and do not ship this file as a working profile.
+#
+# Generate the real profiles on the target machine, which fills every field from
+# one certified, registry-discovered PLAXIS installation:
+#
+#   plaxis-mcp-profiles --output-dir "%LOCALAPPDATA%\Caros\PLAXIS-MCP\profiles"
+#
+# credential_target is DERIVED from installation_root and the role; editing either
+# one without the other makes the profile fail to load. This is deliberate: it is
+# what stops a profile from pointing worker_python at an arbitrary executable
+# while still reading another installation's stored password.
+#
+# This file intentionally contains no password. The password belongs in Windows
+# Credential Manager, written by:
+#
+#   plaxis-mcp-credentials set --profile <generated input.toml>
+schema_version = 1
+role = "input"
+runtime_profile = "legacy-38"
+worker_python = ""
+installation_root = ""
+host = "127.0.0.1"
+port = 10000
+credential_target = "Caros/PLAXIS-MCP/INSTALLATION_ID/input"
+connect_timeout_seconds = 5.0
+request_timeout_seconds = 240.0
+legacy_security_accepted = false

@@ -1,0 +1,5 @@
+# Direct build dependencies for the signed Windows one-directory artifact.
+# Build in a clean CPython 3.13 virtual environment; do not install these into
+# a PLAXIS-owned Python distribution.
+mcp[cli]==1.26.0
+pyinstaller==6.16.0

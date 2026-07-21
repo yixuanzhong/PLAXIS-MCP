@@ -7,4 +7,11 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.vscode/
 
+# Local credentials and installation-specific profile overrides.
+.env
+.env.*
+!.env.example
+profiles/*.local.toml
+profiles/*.local.json

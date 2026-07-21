@@ -1,0 +1,3 @@
+# Direct host runtime lock. Resolve in a clean CPython 3.13 environment before release.
+# Vendor SDK packages are intentionally absent: only the PLAXIS worker imports them.
+mcp[cli]==1.26.0

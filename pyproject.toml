@@ -4,17 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaxis-mcp"
-version = "0.1.0"
-description = "MCP server for interacting with PLAXIS via the PLAXIS Remote Scripting API"
+version = "0.2.0"
+description = "Client-neutral stdio MCP server for PLAXIS Remote Scripting"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13,<3.14"
 license = { file = "LICENSE" }
 authors = [
   { name = "Yixuan Zhong" }
 ]
 dependencies = [
-  "mcp[cli]>=1.24.0,<2.0.0",
-  "plxscripting>=1.0.4,<2.0.0",
+  "mcp[cli]==1.26.0",
+]
+
+[project.optional-dependencies]
+# Packaging is intentionally an opt-in host-side dependency. Nothing in this
+# project installs into a PLAXIS-owned Python distribution.
+package = [
+  "pyinstaller==6.16.0",
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: Microsoft :: Windows",
 ]
 
 [project.urls]
@@ -22,6 +34,8 @@ Repository = "https://github.com/yixuanzhong/PLAXIS-MCP"
 
 [project.scripts]
 plaxis-mcp = "plaxis_mcp.server:main"
+plaxis-mcp-credentials = "plaxis_mcp.deployment:credentials_main"
+plaxis-mcp-profiles = "plaxis_mcp.deployment:profiles_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

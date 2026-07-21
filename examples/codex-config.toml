@@ -1,0 +1,26 @@
+# Add to a trusted user-level ~/.codex/config.toml or a trusted project's
+# .codex/config.toml. Replace <YOU> with the Windows account that ran the
+# PLAXIS-MCP installer.
+#
+# Both entries launch the same signed executable; the profile decides the role,
+# the endpoint, and which installation's password is read from Windows
+# Credential Manager. There is no password and no env table here -- `serve
+# --config` refuses to start if any PLAXIS_* endpoint override is present.
+#
+# Keep interactive approval. Do not permanently allow the mutators.
+
+[mcp_servers.plaxis_input]
+command = "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe"
+args = ["serve", "--config", "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\input.toml"]
+startup_timeout_sec = 30
+tool_timeout_sec = 300
+enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project"]
+default_tools_approval_mode = "writes"
+
+[mcp_servers.plaxis_output]
+command = "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe"
+args = ["serve", "--config", "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\output.toml"]
+startup_timeout_sec = 30
+tool_timeout_sec = 300
+enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "list_result_types", "get_results"]
+default_tools_approval_mode = "writes"

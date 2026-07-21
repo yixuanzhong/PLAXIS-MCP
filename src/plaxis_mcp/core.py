@@ -17,8 +17,20 @@ class PlaxisConnectionError(RuntimeError):
 
 def _maybe_add_plaxis_scripting_path() -> None:
     extra_path = os.getenv("PLAXIS_SCRIPTING_PATH")
-    if extra_path and extra_path not in sys.path:
-        sys.path.insert(0, extra_path)
+    if not extra_path:
+        return
+
+    normalized_extra_path = os.path.normcase(os.path.normpath(extra_path))
+    normalized_sys_path = {
+        os.path.normcase(os.path.normpath(path))
+        for path in sys.path
+        if path
+    }
+    if normalized_extra_path not in normalized_sys_path:
+        # Keep the current interpreter's environment ahead of the PLAXIS bundle
+        # to avoid mixing pure-Python modules from PLAXIS with compiled wheels
+        # from this venv, such as cffi/_cffi_backend.
+        sys.path.append(extra_path)
 
 
 def load_new_server() -> Callable[..., Any]:
