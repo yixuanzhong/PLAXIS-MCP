@@ -325,6 +325,59 @@ class WorkerRuntimeTests(unittest.TestCase):
         status = runtime.handle_request({"protocol": 1, "id": 2, "operation": "status", "params": {}})
         self.assertFalse(status["result"]["connected"])
 
+    def test_connect_refuses_a_rejected_password(self) -> None:
+        """new_server succeeds with any password.
+
+        server.active and server_full_name are served unauthenticated, so
+        without a probe an endpoint reported "connected" with a wrong or empty
+        credential and only later queries failed. PLAXIS words the rejection
+        two ways, and both must be caught.
+        """
+
+        for message in (
+            "The server failed to decrypt the request. This probably means the password "
+            "on the client does not match the one on the server.",
+            'Request is missing "Code" key needed for decryption.',
+        ):
+            class Unauthenticated:
+                def __getattr__(self, name):
+                    raise RuntimeError(message)
+
+            runtime = WorkerRuntime(
+                role="input",
+                new_server_factory=lambda **k: (FakeServer(), Unauthenticated()),
+            )
+            response = runtime.handle_request(
+                {"protocol": 1, "id": 1, "operation": "connect",
+                 "params": {"host": "127.0.0.1", "port": 10000, "password": "wrong", "timeout": 5}}
+            )
+            self.assertFalse(response["ok"], message)
+            self.assertEqual(response["error"]["code"], "AUTHENTICATION_FAILED")
+            status = runtime.handle_request({"protocol": 1, "id": 2, "operation": "status", "params": {}})
+            self.assertFalse(status["result"]["connected"])
+
+    def test_connect_allows_a_probe_that_fails_for_a_non_auth_reason(self) -> None:
+        """A missing member is not an authentication failure.
+
+        PLAXIS Output exposes no Project object even when authenticated, so a
+        probe error unrelated to decryption must not block the connection.
+        """
+
+        class OnlyPhases:
+            Phases = ["InitialPhase"]
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        runtime = WorkerRuntime(role="output",
+                                new_server_factory=lambda **k: (FakeServer(), OnlyPhases()))
+        response = runtime.handle_request(
+            {"protocol": 1, "id": 1, "operation": "connect",
+             "params": {"host": "127.0.0.1", "port": 10002, "password": "pw", "timeout": 5}}
+        )
+        self.assertTrue(response["ok"], response)
+        self.assertTrue(response["result"]["connected"])
+
     def test_connect_refuses_the_other_plaxis_role(self) -> None:
         class OutputServer(FakeServer):
             def __init__(self) -> None:

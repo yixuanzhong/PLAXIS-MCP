@@ -384,7 +384,43 @@ class WorkerRuntime(object):
         if identity_error:
             self._drop_session("WRONG_ENDPOINT")
             raise WorkerError("WRONG_ENDPOINT", identity_error)
+        if self._authentication_failed(self._global_object):
+            self._drop_session("AUTHENTICATION_FAILED")
+            raise WorkerError(
+                "AUTHENTICATION_FAILED",
+                "The PLAXIS scripting server rejected the stored password for this endpoint.",
+            )
         return result
+
+    @staticmethod
+    def _authentication_failed(global_object):
+        """Prove the password works, because connecting does not.
+
+        new_server succeeds with any password: server.active and
+        server_full_name are served unauthenticated, and only a model request
+        is checked. Without this probe an endpoint reported state "connected"
+        while every subsequent query failed, which is a false success and hides
+        a wrong credential behind unrelated errors.
+
+        A role-appropriate probe is attempted first. If it raises for a reason
+        other than authentication -- the member simply not existing on this
+        endpoint or project -- the session is still authenticated, so only the
+        server's explicit rejection is treated as a failure.
+
+        The server reports a rejected credential two different ways: a wrong
+        password gives "the server failed to decrypt the request", and an empty
+        one gives "request is missing Code key needed for decryption". Both name
+        the decryption step, so that is what is matched.
+        """
+
+        for member in ("Project", "Phases"):
+            try:
+                getattr(global_object, member)
+                return False
+            except Exception as exc:
+                if "decrypt" in str(exc).lower():
+                    return True
+        return False
 
     def _drop_session(self, reason):
         self._close_session(self._server)
