@@ -46,13 +46,19 @@ def parse_path(path):
     if not path:
         return []
     tokens, current, index = [], [], 0
+    # A "." immediately after a "]" is a legitimate separator (Plates[-1].Name),
+    # not an empty member name -- only a "." with nothing meaningful before it
+    # (leading, or after another ".") is the actual error this flag guards.
+    just_closed_bracket = False
     while index < len(path):
         character = path[index]
         if character == ".":
-            if not current:
+            if not current and not just_closed_bracket:
                 raise WorkerError("INVALID_PATH", "PLAXIS paths cannot contain empty member names.")
-            tokens.append(_public_member_name("".join(current), "path member"))
-            current = []
+            if current:
+                tokens.append(_public_member_name("".join(current), "path member"))
+                current = []
+            just_closed_bracket = False
             index += 1
             continue
         if character == "[":
@@ -61,12 +67,18 @@ def parse_path(path):
                 current = []
             end = path.find("]", index)
             raw_index = path[index + 1 : end].strip() if end != -1 else ""
-            if not raw_index.isdigit():
+            # PLAXIS's own command syntax uses negative indices for "last item"
+            # (e.g. Plates[-1], seen in the activate command reference), so a
+            # leading "-" must be accepted alongside plain digits.
+            unsigned_index = raw_index[1:] if raw_index.startswith("-") else raw_index
+            if not unsigned_index or not unsigned_index.isdigit():
                 raise WorkerError("INVALID_PATH", "PLAXIS path indexes must be numeric and closed.")
             tokens.append(int(raw_index))
             index = end + 1
+            just_closed_bracket = True
             continue
         current.append(character)
+        just_closed_bracket = False
         index += 1
     if current:
         tokens.append(_public_member_name("".join(current), "path member"))
@@ -732,10 +744,19 @@ class WorkerRuntime(object):
         target = resolve_path(global_object, path)
         return {"path": path, "members": safe_dir(target), "summary": describe_value(target)}
 
+    # The command reference (commands_getresults.html) documents exactly these
+    # four fem_type values; anything else fails server-side with an unhelpful
+    # error, so validate it here instead.
+    _FEM_TYPES = frozenset(("node", "stresspoint", "element", "materialpoint"))
+
     def _get_results(self, global_object, params):
         phase = resolve_phase(global_object, params.get("phase"))
         result_type_path = self._required_string(params, "result_type_path")
-        fem_type = self._optional_string(params, "fem_type", "node")
+        fem_type = self._choice_string(params, "fem_type", self._FEM_TYPES, "node")
+        # Result smoothing is a real, optional trailing argument on getresults
+        # (e.g. "getresults Phase_1 ResultTypes.Soil.Suction \"node\" True") that
+        # was previously unreachable through this tool.
+        smoothing = self._optional_bool(params, "smoothing")
         offset = self._nonnegative_integer(params, "offset", 0)
         limit = self._bounded_integer(params, "limit", 200, 1, 5000)
         result_type = resolve_path(global_object, result_type_path)
@@ -745,8 +766,9 @@ class WorkerRuntime(object):
             raise WorkerError("WRONG_ROLE", "Connected PLAXIS endpoint does not expose Output results.")
         if not callable(getresults):
             raise WorkerError("WRONG_ROLE", "Connected PLAXIS endpoint does not expose Output results.")
+        call_args = (phase, result_type, fem_type) if smoothing is None else (phase, result_type, fem_type, smoothing)
         try:
-            results = list(getresults(phase, result_type, fem_type))
+            results = list(getresults(*call_args))
         except Exception:
             raise WorkerError("PLAXIS_ERROR", "PLAXIS could not retrieve the requested results.")
         count = len(results)
@@ -758,6 +780,7 @@ class WorkerRuntime(object):
             "phase": describe_value(phase),
             "result_type_path": result_type_path,
             "fem_type": fem_type,
+            "smoothing": smoothing,
             "count": count,
             "offset": offset,
             "limit": limit,
@@ -873,6 +896,23 @@ class WorkerRuntime(object):
                 "INVALID_ARGUMENT",
                 "Worker parameter '%s' must be an integer between %d and %d." % (name, minimum, maximum),
             )
+        return value
+
+    @staticmethod
+    def _choice_string(params, name, choices, default):
+        value = params.get(name, default)
+        if not isinstance(value, str) or value not in choices:
+            raise WorkerError(
+                "INVALID_ARGUMENT",
+                "Worker parameter '%s' must be one of: %s." % (name, ", ".join(sorted(choices))),
+            )
+        return value
+
+    @staticmethod
+    def _optional_bool(params, name, default=None):
+        value = params.get(name, default)
+        if value is not None and not isinstance(value, bool):
+            raise WorkerError("INVALID_ARGUMENT", "Worker parameter '%s' must be a boolean." % name)
         return value
 
     def _transition(self, state, last_error=None):

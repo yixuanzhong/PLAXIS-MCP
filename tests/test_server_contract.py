@@ -169,6 +169,7 @@ class ServerContractTests(unittest.TestCase):
                         "phase": 3,
                         "result_type_path": "ResultTypes.Soil.Ux",
                         "fem_type": "node",
+                        "smoothing": None,
                         "offset": 200,
                         "limit": 500,
                     },

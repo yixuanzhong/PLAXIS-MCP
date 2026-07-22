@@ -96,8 +96,43 @@ from plaxis_mcp.bridge import (
 from plaxis_mcp.worker_runtime import (
     CallDispatcher,
     ROLE_TOOL_ALLOWLISTS,
+    WorkerError,
     WorkerRuntime,
+    parse_path,
 )
+
+
+class ParsePathTests(unittest.TestCase):
+    """worker_runtime.parse_path is the path parser that actually runs.
+
+    plaxis_mcp.core has a separate, older parse_path, but core.py is not
+    imported by anything outside its own tests -- it predates the
+    split-runtime architecture and is not on any execution path.
+    """
+
+    def test_accepts_negative_indices(self) -> None:
+        # PLAXIS's own command reference uses Plates[-1] for "last item"
+        # (commands_activate.html); a bare "-" digit check rejected it.
+        self.assertEqual(parse_path("Plates[-1]"), ["Plates", -1])
+        self.assertEqual(parse_path("Foo[-2][-3]"), ["Foo", -2, -3])
+
+    def test_accepts_a_member_immediately_after_a_closed_index(self) -> None:
+        # Foo[i].member is the natural shape for "index into a collection,
+        # then read a property". The "." handler treated the empty token
+        # buffer right after a "]" as an empty-member-name error.
+        self.assertEqual(parse_path("Plates[-1].Name"), ["Plates", -1, "Name"])
+        self.assertEqual(parse_path("Plates[0].Name"), ["Plates", 0, "Name"])
+        self.assertEqual(parse_path("Foo.Bar[2].Baz"), ["Foo", "Bar", 2, "Baz"])
+
+    def test_rejects_malformed_indices(self) -> None:
+        for path in ("Plates[-]", "Plates[--1]", "Plates[1.5]", "Plates[]"):
+            with self.assertRaises(WorkerError):
+                parse_path(path)
+
+    def test_rejects_genuinely_empty_member_names(self) -> None:
+        for path in (".Foo", "Foo..Bar", "Foo[1]..Bar"):
+            with self.assertRaises(WorkerError):
+                parse_path(path)
 
 
 class FakeServer:
@@ -159,7 +194,8 @@ class FakeRoot:
     def saveas(self, filename):
         return filename
 
-    def getresults(self, phase, result_type, fem_type):
+    def getresults(self, phase, result_type, fem_type, smoothing=None):
+        self.last_getresults_call = (phase, result_type, fem_type, smoothing)
         return list(range(250))
 
 
@@ -522,6 +558,67 @@ class WorkerRuntimeTests(unittest.TestCase):
             {"protocol": 1, "id": 6, "operation": "call", "params": {"method": "get_results", "params": {}}}
         )
         self.assertEqual(no_results["error"]["code"], "WRONG_ROLE")
+
+    def test_get_results_validates_fem_type_and_forwards_smoothing(self) -> None:
+        """fem_type has exactly four valid values (commands_getresults.html);
+        anything else must be rejected client-side, not sent to PLAXIS. The
+        trailing smoothing Boolean is a real, optional getresults parameter
+        that must only be forwarded when the caller actually asked for it."""
+
+        roots: list = []
+
+        def factory(**kwargs):
+            root = FakeRoot()
+            roots.append(root)
+            return FakeServer(), root
+
+        output = WorkerRuntime(role="output", new_server_factory=factory)
+        output.handle_request(
+            {"protocol": 1, "id": 1, "operation": "connect", "params": {"host": "127.0.0.1", "port": 10001, "password": "secret"}}
+        )
+
+        bad = output.handle_request(
+            {
+                "protocol": 1, "id": 2, "operation": "call",
+                "params": {"method": "get_results", "params": {
+                    "phase": 0, "result_type_path": "ResultTypes.Soil.Utot", "fem_type": "not-a-real-choice",
+                }},
+            }
+        )
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["error"]["code"], "INVALID_ARGUMENT")
+
+        smoothed = output.handle_request(
+            {
+                "protocol": 1, "id": 3, "operation": "call",
+                "params": {"method": "get_results", "params": {
+                    "phase": 0, "result_type_path": "ResultTypes.Soil.Utot",
+                    "fem_type": "stresspoint", "smoothing": True, "limit": 5,
+                }},
+            }
+        )
+        self.assertTrue(smoothed["ok"], smoothed)
+        self.assertEqual(smoothed["result"]["fem_type"], "stresspoint")
+        self.assertTrue(smoothed["result"]["smoothing"])
+        self.assertEqual(roots[-1].last_getresults_call[2:], ("stresspoint", True))
+
+        unsmoothed = output.handle_request(
+            {
+                "protocol": 1, "id": 4, "operation": "call",
+                "params": {"method": "get_results", "params": {
+                    "phase": 0, "result_type_path": "ResultTypes.Soil.Utot", "limit": 5,
+                }},
+            }
+        )
+        self.assertTrue(unsmoothed["ok"], unsmoothed)
+        self.assertIsNone(unsmoothed["result"]["smoothing"])
+        # Omitted smoothing must not be forwarded as an explicit None argument.
+        # get_results calls resolve_phase first, so the worker's own call
+        # receives the resolved phase OBJECT, not the raw index the client sent.
+        self.assertEqual(
+            roots[-1].last_getresults_call,
+            (roots[-1].Phases[0], roots[-1].ResultTypes.Soil.Utot, "node", None),
+        )
 
     def test_private_path_or_method_is_rejected(self) -> None:
         def factory(**kwargs):

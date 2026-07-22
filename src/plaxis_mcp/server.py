@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Annotated, Any, Callable, Mapping, TypeAlias
+from typing import Annotated, Any, Callable, Literal, Mapping, TypeAlias
 
 from mcp.server.fastmcp import FastMCP
 from mcp import types as mcp_types
@@ -594,7 +594,16 @@ def create_server(
             path: StrictStr = "",
             args: list[JsonValue] | None = None,
         ) -> dict[str, Any]:
-            """Call an explicitly named PLAXIS method with positional arguments."""
+            """Call an explicitly named PLAXIS method with literal positional arguments.
+
+            Every argument must be a literal value (number, string, boolean, or an
+            array/object of literals) -- there is no way to pass a reference to
+            another PLAXIS object or phase through this tool. A string argument is
+            sent to PLAXIS as a quoted text literal, not as a reference, so it
+            cannot stand in for an object or phase parameter even when it names
+            one. Use this only for methods whose PLAXIS command reference shows
+            purely literal parameters (numbers, text, booleans).
+            """
 
             return _invoke(session, "call_method", path=path, method=method, args=args or [])
 
@@ -642,11 +651,16 @@ def create_server(
         def get_results(
             phase: StrictInt | StrictStr,
             result_type_path: Annotated[StrictStr, Field(min_length=1)],
-            fem_type: Annotated[StrictStr, Field(min_length=1)] = "node",
+            fem_type: Literal["node", "stresspoint", "element", "materialpoint"] = "node",
+            smoothing: StrictBool | None = None,
             offset: Annotated[StrictInt, Field(ge=0)] = 0,
             limit: Annotated[StrictInt, Field(ge=1, le=5000)] = 200,
         ) -> dict[str, Any]:
-            """Fetch one lossless page of PLAXIS Output results."""
+            """Fetch one lossless page of PLAXIS Output results.
+
+            smoothing enables PLAXIS's result-smoothing option where supported;
+            omit it to use PLAXIS's own default for the result type.
+            """
 
             return _invoke(
                 session,
@@ -654,6 +668,7 @@ def create_server(
                 phase=phase,
                 result_type_path=result_type_path,
                 fem_type=fem_type,
+                smoothing=smoothing,
                 offset=offset,
                 limit=limit,
             )
