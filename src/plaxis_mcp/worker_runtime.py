@@ -578,7 +578,15 @@ class WorkerRuntime(object):
             phases = global_object.Phases
             iterator = iter(phases)
         except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS phases could not be read.")
+            # Observed live: a PLAXIS 2D Input project that has not reached
+            # staged construction exposes no Phases collection at all, while
+            # the Output endpoint for a calculated project does. Name the
+            # likely cause instead of reporting a bare failure.
+            raise WorkerError(
+                "PLAXIS_ERROR",
+                "This PLAXIS project exposes no phases. An Input project only lists phases "
+                "once staged construction exists; calculated results are on the Output endpoint.",
+            )
         items = []
         for index, phase in enumerate(iterator):
             items.append({
@@ -616,14 +624,36 @@ class WorkerRuntime(object):
 
     @staticmethod
     def _project_info(global_object):
-        return {
-            "project_title": describe_value(read_member_value(global_object, "ProjectTitle")),
-            "project_description": describe_value(read_member_value(global_object, "ProjectDescription")),
-            "filename": describe_value(read_member_value(global_object, "Filename")),
-            "unit_force": describe_value(read_member_value(global_object, "UnitForce")),
-            "unit_length": describe_value(read_member_value(global_object, "UnitLength")),
-            "unit_time": describe_value(read_member_value(global_object, "UnitTime")),
-        }
+        """Read project metadata from the Project object that owns it.
+
+        These names live on ``g.Project`` (Title, Comments, Filename, Unit*),
+        not on the global object. Reading them off the global returned None for
+        every field, so a loaded project was reported as an empty one -- a
+        silent wrong answer rather than a visible failure. PLAXIS Output
+        exposes no Project object at all, which is now stated instead of being
+        rendered as a project with no title.
+        """
+
+        project = read_member_value(global_object, "Project")
+        if project is None:
+            return {
+                "available": False,
+                "reason": "This PLAXIS endpoint exposes no Project object; "
+                          "project metadata is available on the Input endpoint.",
+            }
+        fields = (
+            ("project_title", "Title"),
+            ("project_description", "Comments"),
+            ("company", "Company"),
+            ("filename", "Filename"),
+            ("unit_force", "UnitForce"),
+            ("unit_length", "UnitLength"),
+            ("unit_time", "UnitTime"),
+        )
+        info = {"available": True}
+        for key, member in fields:
+            info[key] = describe_value(read_member_value(project, member))
+        return info
 
     def _list_result_types(self, global_object, params):
         path = self._optional_string(params, "path", "ResultTypes")
