@@ -337,6 +337,26 @@ class FakeRoot:
         self.last_mesh_call = args
         return True
 
+    def point(self, *coordinates):
+        self.last_point_call = coordinates
+        return True
+
+    def line(self, *vertices):
+        self.last_line_call = vertices
+        return True
+
+    def polygon(self, *vertices):
+        self.last_polygon_call = vertices
+        return True
+
+    def borehole(self, x):
+        self.last_borehole_call = x
+        return True
+
+    def soillayer(self, height):
+        self.last_soillayer_call = height
+        return True
+
 
 class BridgeTests(unittest.TestCase):
     def make_session(self, password: str = "top-secret") -> BridgeSession:
@@ -452,7 +472,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         handshake = runtime.handle_request({"protocol": 1, "id": 1, "operation": "handshake", "params": {}})
         self.assertTrue(handshake["ok"])
         self.assertEqual(handshake["result"]["role"], "input")
-        self.assertEqual(len(handshake["result"]["operations"]), 21)
+        self.assertEqual(len(handshake["result"]["operations"]), 26)
 
         connected = runtime.handle_request(
             {
@@ -648,7 +668,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(not_connected["error"]["code"], "NOT_CONNECTED")
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 23)
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 28)
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 10)
 
         def factory(**kwargs):
@@ -857,6 +877,58 @@ class WorkerRuntimeTests(unittest.TestCase):
         full = self._call(runtime, "generate_mesh", relative_element_size=0.1, enhanced_refinement=True)
         self.assertTrue(full["ok"], full)
         self.assertEqual(root.last_mesh_call, (0.1, True))
+
+    def test_create_point_passes_literal_coordinate_tuples(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(runtime, "create_point", coordinates=[[5, 6], [8, 9]])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(root.last_point_call, ((5, 6), (8, 9)))
+
+    def test_create_line_and_polygon_accept_mixed_reference_and_literal_vertices(self) -> None:
+        """Each vertex is either a [x, y] literal or a path to an existing
+        point -- both line and polygon must resolve string vertices to the
+        real object while passing literal coordinates through unchanged."""
+
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        line_result = self._call(runtime, "create_line", vertices=["Phases[0]", [1, 2]])
+        self.assertTrue(line_result["ok"], line_result)
+        self.assertEqual(root.last_line_call, (root.Phases[0], (1, 2)))
+        self.assertNotIsInstance(root.last_line_call[0], str)
+
+        polygon_result = self._call(runtime, "create_polygon", vertices=[[0, 0], [4, 0], "Phases[1]"])
+        self.assertTrue(polygon_result["ok"], polygon_result)
+        self.assertEqual(root.last_polygon_call, ((0, 0), (4, 0), root.Phases[1]))
+
+    def test_create_line_and_polygon_enforce_minimum_vertex_counts(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        too_few_line = self._call(runtime, "create_line", vertices=[[0, 0]])
+        self.assertFalse(too_few_line["ok"])
+        self.assertEqual(too_few_line["error"]["code"], "INVALID_ARGUMENT")
+
+        too_few_polygon = self._call(runtime, "create_polygon", vertices=[[0, 0], [1, 1]])
+        self.assertFalse(too_few_polygon["ok"])
+        self.assertEqual(too_few_polygon["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_create_borehole_and_soillayer_accept_any_sign_or_zero(self) -> None:
+        """x is a coordinate, not a magnitude: negative and zero are valid,
+        unlike _optional_number's existing positive-only callers."""
+
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        for x in (-5.0, 0.0, 5.0):
+            result = self._call(runtime, "create_borehole", x=x)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(root.last_borehole_call, x)
+
+        soil = self._call(runtime, "create_soillayer", height=3)
+        self.assertTrue(soil["ok"], soil)
+        self.assertEqual(root.last_soillayer_call, 3)
 
     def test_private_path_or_method_is_rejected(self) -> None:
         def factory(**kwargs):

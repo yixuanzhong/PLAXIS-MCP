@@ -105,6 +105,11 @@ class ServerContractTests(unittest.TestCase):
                 "set_phase_property",
                 "set_mode",
                 "generate_mesh",
+                "create_point",
+                "create_line",
+                "create_polygon",
+                "create_borehole",
+                "create_soillayer",
             },
         )
         self.assertEqual(

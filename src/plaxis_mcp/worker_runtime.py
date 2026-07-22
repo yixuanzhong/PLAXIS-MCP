@@ -21,6 +21,7 @@ INPUT_OPERATIONS = COMMON_OPERATIONS + (
     "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project",
     "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property",
     "set_mode", "generate_mesh",
+    "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer",
 )
 OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results")
 ROLE_OPERATION_ALLOWLISTS = {"input": INPUT_OPERATIONS, "output": OUTPUT_OPERATIONS}
@@ -591,6 +592,11 @@ class WorkerRuntime(object):
             "set_phase_property": lambda server, global_object, params: self._set_phase_property(global_object, params),
             "set_mode": lambda server, global_object, params: self._set_mode(global_object, params),
             "generate_mesh": lambda server, global_object, params: self._generate_mesh(global_object, params),
+            "create_point": lambda server, global_object, params: self._create_point(global_object, params),
+            "create_line": lambda server, global_object, params: self._create_line(global_object, params),
+            "create_polygon": lambda server, global_object, params: self._create_polygon(global_object, params),
+            "create_borehole": lambda server, global_object, params: self._create_borehole(global_object, params),
+            "create_soillayer": lambda server, global_object, params: self._create_soillayer(global_object, params),
             "list_result_types": lambda server, global_object, params: self._list_result_types(global_object, params),
             "get_results": lambda server, global_object, params: self._get_results(global_object, params),
         }
@@ -840,6 +846,70 @@ class WorkerRuntime(object):
             "result": describe_value(result),
         }
 
+    # -- Geometry creation (WP-E) ---------------------------------------------
+    #
+    # point/line/polygon share one union parameter shape throughout the
+    # command reference: each vertex is either a [x, y] literal coordinate
+    # pair or a reference to an existing Point object. One resolver serves
+    # all three rather than duplicating the same union three times.
+
+    @staticmethod
+    def _resolve_vertex(global_object, vertex, label):
+        if isinstance(vertex, str):
+            return resolve_reference(global_object, vertex, label)
+        if (
+            isinstance(vertex, (list, tuple))
+            and len(vertex) == 2
+            and all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in vertex)
+        ):
+            return (vertex[0], vertex[1])
+        raise WorkerError(
+            "INVALID_ARGUMENT", "%s must be a [x, y] coordinate pair or a PLAXIS point path." % label
+        )
+
+    def _resolve_vertices(self, global_object, vertices, label, minimum):
+        if not isinstance(vertices, list) or len(vertices) < minimum:
+            raise WorkerError(
+                "INVALID_ARGUMENT", "%s must be an array of at least %d vertices." % (label, minimum)
+            )
+        return [self._resolve_vertex(global_object, vertex, label) for vertex in vertices]
+
+    def _create_point(self, global_object, params):
+        # point's own parameters are always literal coordinates -- there is
+        # no Point-reference form, unlike line/polygon.
+        coordinates = self._resolve_vertices(global_object, params.get("coordinates"), "coordinates", 1)
+        result = call_plaxis_command(global_object, "point", *coordinates)
+        return {"coordinates": params.get("coordinates"), "result": describe_value(result)}
+
+    def _create_line(self, global_object, params):
+        # Signature 1 (exactly 2 vertices) and signature 2 (3+ vertices) are
+        # both variadic point/coordinate lists; PLAXIS dispatches on the
+        # argument count itself, so no branching is needed here. The third,
+        # angle/relative/vector sub-command signature is not implemented in
+        # this pass -- vertices only.
+        vertices = self._resolve_vertices(global_object, params.get("vertices"), "vertices", 2)
+        result = call_plaxis_command(global_object, "line", *vertices)
+        return {"vertices": params.get("vertices"), "result": describe_value(result)}
+
+    def _create_polygon(self, global_object, params):
+        # Vertex-list signature only; the Polycurve-based signature
+        # (polygon Polycurve_1 Polycurve_2 ...) is not implemented in this
+        # pass, since it depends on a polycurve command this plan does not
+        # wire.
+        vertices = self._resolve_vertices(global_object, params.get("vertices"), "vertices", 3)
+        result = call_plaxis_command(global_object, "polygon", *vertices)
+        return {"vertices": params.get("vertices"), "result": describe_value(result)}
+
+    def _create_borehole(self, global_object, params):
+        x = self._required_number(params, "x")
+        result = call_plaxis_command(global_object, "borehole", x)
+        return {"x": x, "result": describe_value(result)}
+
+    def _create_soillayer(self, global_object, params):
+        height = self._required_number(params, "height")
+        result = call_plaxis_command(global_object, "soillayer", height)
+        return {"height": height, "result": describe_value(result)}
+
     @staticmethod
     def _list_phases(global_object):
         try:
@@ -1056,6 +1126,17 @@ class WorkerRuntime(object):
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise WorkerError("INVALID_ARGUMENT", "Worker parameter '%s' must be a positive number." % name)
+        return float(value)
+
+    @staticmethod
+    def _required_number(params, name):
+        # Deliberately no sign constraint: a coordinate such as borehole's x
+        # can legitimately be negative or zero, unlike _optional_number's
+        # existing callers (timeouts, mesh size), which genuinely must be
+        # positive.
+        value = params.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise WorkerError("INVALID_ARGUMENT", "Worker parameter '%s' must be a number." % name)
         return float(value)
 
     @staticmethod

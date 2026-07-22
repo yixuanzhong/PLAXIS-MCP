@@ -748,6 +748,52 @@ def create_server(
                 relative_element_size=relative_element_size, enhanced_refinement=enhanced_refinement,
             )
 
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_point(
+            coordinates: Annotated[list[list[StrictFloat]], Field(min_length=1)],
+        ) -> dict[str, Any]:
+            """Create one or more points at [x, y] coordinates."""
+
+            return _invoke(session, "create_point", coordinates=coordinates)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_line(
+            vertices: Annotated[list[list[StrictFloat] | StrictStr], Field(min_length=2)],
+        ) -> dict[str, Any]:
+            """Create a line, or a polyline through 3 or more vertices.
+
+            Each vertex is either an [x, y] coordinate or the path of an
+            existing point. Only the vertex-list form of the line command is
+            implemented; the angle/relative/vector sub-command form is not.
+            """
+
+            return _invoke(session, "create_line", vertices=vertices)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_polygon(
+            vertices: Annotated[list[list[StrictFloat] | StrictStr], Field(min_length=3)],
+        ) -> dict[str, Any]:
+            """Create a polygon from 3 or more vertices.
+
+            Each vertex is either an [x, y] coordinate or the path of an
+            existing point. Only the vertex-list form is implemented; the
+            polycurve-based form is not.
+            """
+
+            return _invoke(session, "create_polygon", vertices=vertices)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_borehole(x: StrictFloat) -> dict[str, Any]:
+            """Add a borehole at the given x-coordinate."""
+
+            return _invoke(session, "create_borehole", x=x)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_soillayer(height: StrictFloat) -> dict[str, Any]:
+            """Add a soil layer with the given height."""
+
+            return _invoke(session, "create_soillayer", height=height)
+
     else:
 
         @server.tool(annotations=_READ, structured_output=True)
