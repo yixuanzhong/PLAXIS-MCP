@@ -339,6 +339,64 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"]["code"], "WRONG_ENDPOINT")
 
+    def _input_runtime(self, global_object):
+        runtime = WorkerRuntime(role="input",
+                                new_server_factory=lambda **k: (FakeServer(), global_object))
+        runtime.handle_request({"protocol": 1, "id": 1, "operation": "connect",
+                                "params": {"host": "127.0.0.1", "port": 10000, "password": "pw", "timeout": 5}})
+        return runtime
+
+    def _call(self, runtime, method, **params):
+        return runtime.handle_request({"protocol": 1, "id": 9, "operation": "call",
+                                       "params": {"method": method, "params": params}})
+
+    def test_open_project_rejects_a_path_with_no_project_file(self) -> None:
+        """Observed live: opening a missing path reported a successful open."""
+
+        runtime = self._input_runtime(object())
+        response = self._call(runtime, "open_project", filename=r"C:\tmp\definitely-not-here.p2dx")
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "INVALID_PATH")
+
+    def test_set_property_refuses_a_path_naming_an_object(self) -> None:
+        """A proxy accepts setattr for anything, so an object assignment
+        silently landed on the local proxy and read back as success."""
+
+        class Proxy:
+            _guid = "{OBJECT}"
+
+        class Global:
+            def __init__(self):
+                self.Project = Proxy()
+
+        runtime = self._input_runtime(Global())
+        response = self._call(runtime, "set_property", path="Project", value=1)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "INVALID_PATH")
+
+    def test_set_property_allows_a_writable_property_and_reports_the_old_value(self) -> None:
+        class Prop:
+            _guid = "{PROP}"
+
+            def __init__(self, value):
+                self.value = value
+
+        class Project:
+            def __init__(self):
+                self.Title = Prop("before")
+
+        class Global:
+            def __init__(self):
+                self.Project = Project()
+
+        runtime = self._input_runtime(Global())
+        response = self._call(runtime, "set_property", path="Project.Title", value="after")
+        self.assertTrue(response["ok"], response)
+        # The snapshot must survive the mutation: a live proxy described after
+        # the set would report the new value as the previous one.
+        self.assertEqual(response["result"]["previous"], {"kind": "property", "value": "before"})
+        self.assertEqual(response["result"]["value"], "after")
+
     def test_runtime_masks_connection_secret_and_rejects_unregistered_calls(self) -> None:
         def failing_factory(**kwargs):
             raise RuntimeError("could not connect using " + kwargs["password"])

@@ -498,12 +498,35 @@ class WorkerRuntime(object):
                 target = target[token] if isinstance(token, int) else getattr(target, token)
             except Exception:
                 raise WorkerError("INVALID_PATH", "PLAXIS property path could not be resolved.")
+        # A PLAXIS proxy accepts setattr for any name, including one that names
+        # an object rather than a property: the assignment then lands on the
+        # local proxy, shadows the real object, and reads back as the value the
+        # caller sent. That reported a successful mutation while PLAXIS was
+        # never touched, so refuse anything that is not a writable property.
+        try:
+            previous = getattr(target, tokens[-1])
+        except Exception:
+            raise WorkerError("INVALID_PATH", "PLAXIS property path could not be resolved.")
+        # A property proxy exposes .value and is writable; an object proxy does
+        # not. Both carry _guid, so the guid alone cannot tell them apart --
+        # keying on it rejected legitimate sets such as Project.Title.
+        is_property = hasattr(previous, "value")
+        is_object = hasattr(previous, "_guid") or hasattr(previous, "get_cmd_line_repr")
+        if is_object and not is_property:
+            raise WorkerError(
+                "INVALID_PATH",
+                "This path names a PLAXIS object, not a writable property. "
+                "Append the property to set, for example Project.Title.",
+            )
+        # Snapshot before mutating: a PLAXIS property proxy is a live reference,
+        # so describing it after the set reports the new value as the old one.
+        previous_value = describe_value(previous)
         try:
             setattr(target, tokens[-1], params.get("value"))
             value = getattr(target, tokens[-1])
         except Exception:
             raise WorkerError("PLAXIS_ERROR", "PLAXIS rejected the requested property update.")
-        return {"path": path, "value": describe_value(value)}
+        return {"path": path, "previous": previous_value, "value": describe_value(value)}
 
     def _call_method(self, global_object, params):
         path = self._optional_string(params, "path", "")
@@ -535,6 +558,11 @@ class WorkerRuntime(object):
 
     def _open_project(self, server, params):
         filename = self._required_string(params, "filename")
+        # Opening a path that does not exist did not raise: it reported a
+        # successful open of a file that was never there. The worker runs on
+        # the PLAXIS host, so this is the same filesystem PLAXIS would read.
+        if not os.path.isfile(filename):
+            raise WorkerError("INVALID_PATH", "No PLAXIS project file exists at the requested path.")
         try:
             result = server.open(filename)
         except Exception:
@@ -561,15 +589,23 @@ class WorkerRuntime(object):
         filename = params.get("filename")
         if filename is not None and (not isinstance(filename, str) or not filename):
             raise WorkerError("INVALID_ARGUMENT", "PLAXIS save filename must be a non-empty string when supplied.")
-        name = "save" if filename is None else "saveas"
+        # PLAXIS exposes a single "save" command that takes an optional target
+        # path. There is no "saveas": calling it raised, and every save to a new
+        # path failed with a generic error.
         try:
-            method = getattr(global_object, name)
+            method = getattr(global_object, "save")
             result = method() if filename is None else method(filename)
         except Exception:
             raise WorkerError("PLAXIS_ERROR", "PLAXIS could not save the active project.")
         payload = {"action": "save_project", "result": describe_value(result)}
         if filename is not None:
             payload["filename"] = filename
+            # A save that wrote nothing must not be reported as success.
+            if not os.path.isfile(filename):
+                raise WorkerError(
+                    "PLAXIS_ERROR",
+                    "PLAXIS reported a save but no project file exists at the requested path.",
+                )
         return payload
 
     @staticmethod
