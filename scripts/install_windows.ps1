@@ -31,6 +31,7 @@ try {
 if ($null -eq $Manifest.files -or $Manifest.files.Count -eq 0 -or $null -eq $Manifest.vendor_redistribution_check -or -not $Manifest.vendor_redistribution_check.passed) {
     throw "artifact-manifest.json did not pass its vendor redistribution gate."
 }
+$ExpectedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($Entry in $Manifest.files) {
     $Relative = [string]$Entry.path
     if ([System.IO.Path]::IsPathRooted($Relative) -or $Relative -match '(^|[\\/])\.\.([\\/]|$)') {
@@ -43,6 +44,26 @@ foreach ($Entry in $Manifest.files) {
     $ActualHash = (Get-FileHash -LiteralPath $ArtifactFile -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($ActualHash -ne ([string]$Entry.sha256).ToLowerInvariant()) {
         throw "Artifact hash mismatch: $Relative"
+    }
+    [void]$ExpectedPaths.Add($Relative)
+}
+
+# Hashing only the listed files proves nothing about files that are NOT listed.
+# A PyInstaller one-directory bundle loads its DLLs from this directory, so an
+# unlisted binary planted here would be copied to the install location and
+# loaded by the signed executable while every listed hash still matched. The
+# manifest is exhaustive by construction (write_artifact_manifest.py walks the
+# tree with rglob), so anything extra is unexpected by definition.
+# Manifest paths are forward-slash relative (Path.as_posix) and the manifest
+# excludes itself, so normalise separators and skip it here too.
+$ManifestName = Split-Path -Leaf $ManifestPath
+foreach ($Present in Get-ChildItem -LiteralPath $ResolvedSource -Recurse -File -Force) {
+    $Relative = $Present.FullName.Substring($ResolvedSource.Length).TrimStart('\', '/').Replace('\', '/')
+    if ($Relative -eq $ManifestName) {
+        continue
+    }
+    if (-not $ExpectedPaths.Contains($Relative)) {
+        throw "Artifact contains a file absent from artifact-manifest.json: $Relative"
     }
 }
 if (-not $DevelopmentUnsigned) {

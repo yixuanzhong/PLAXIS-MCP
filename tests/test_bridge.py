@@ -4,6 +4,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 def _fake_worker() -> None:
     state = {"connected": False, "password": ""}
@@ -164,6 +165,17 @@ class FakeRoot:
 
 class BridgeTests(unittest.TestCase):
     def make_session(self, password: str = "top-secret") -> BridgeSession:
+        # This suite's worker is this test file itself, which sits outside the
+        # package directory the integrity gate requires. The gate has no opt-out
+        # by design -- production must not be able to weaken it -- so the trusted
+        # roots are patched here instead, which only a test can do.
+        patcher = patch.object(
+            BridgeSessionConfig,
+            "trusted_script_roots",
+            lambda _self: (Path(__file__).parent.resolve(),),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return BridgeSession(
             BridgeSessionConfig(
                 worker_python=sys.executable,
@@ -173,9 +185,6 @@ class BridgeTests(unittest.TestCase):
                 password=password,
                 startup_timeout=2.0,
                 request_timeout=2.0,
-                # This suite's worker is this test file itself, which is outside
-                # the package directory the integrity gate normally requires.
-                trust_worker_script_path=True,
             )
         )
 
@@ -213,6 +222,33 @@ class BridgeTests(unittest.TestCase):
 
         self.assertTrue(session.uncertain)
         self.assertEqual(session.status()["state"], "uncertain")
+
+    def test_uncertainty_survives_worker_replacement_until_reconnect(self) -> None:
+        """A fresh worker does not make a half-applied mutation certain."""
+
+        session = self.make_session()
+        self.addCleanup(session.close)
+        session.connect()
+
+        with self.assertRaises(WorkerTimeoutError):
+            session.invoke("hang", timeout=0.05)
+        self.assertTrue(session.uncertain)
+
+        # Any later call revives the worker. Restarting a process says nothing
+        # about whether the interrupted PLAXIS operation landed, so the session
+        # must stay uncertain and keep reporting it.
+        session._bridge.start()
+        self.assertTrue(session._bridge.started)
+        self.assertFalse(session._bridge.worker_faulted)
+        self.assertTrue(session.uncertain)
+        self.assertEqual(session.status()["state"], "uncertain")
+
+        # Only an explicit, successful reconnect clears it -- and says so.
+        self.assertTrue(session.connect()["recovered_from_uncertain"])
+        self.assertFalse(session.uncertain)
+        self.assertNotEqual(session.status()["state"], "uncertain")
+        # A routine reconnect must not claim a recovery that did not happen.
+        self.assertFalse(session.connect()["recovered_from_uncertain"])
 
     def test_malformed_worker_record_is_a_protocol_failure(self) -> None:
         session = self.make_session()

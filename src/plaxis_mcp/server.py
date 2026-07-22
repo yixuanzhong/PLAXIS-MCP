@@ -670,6 +670,11 @@ def _normalized_status_after(result: Any, session: Any, config: ServerConfig) ->
         normalized = _normalized_status(session, config)
         normalized["state"] = result.get("state", normalized["state"])
         normalized["connected"] = bool(result.get("connected", normalized["connected"]))
+        # connect reports whether it just cleared a session uncertainty, so an
+        # agent learns that an earlier operation's outcome was never confirmed.
+        # Only connect sets this, so disconnect's shape is unchanged.
+        if "recovered_from_uncertain" in result:
+            normalized["recovered_from_uncertain"] = bool(result["recovered_from_uncertain"])
         return normalized
     return _normalized_status(session, config)
 

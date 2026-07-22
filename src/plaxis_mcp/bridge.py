@@ -80,7 +80,6 @@ class BridgeSessionConfig:
     runtime_profile: str | None = None
     installation_root: str | None = None
     worker_script_sha256: str | None = None
-    trust_worker_script_path: bool = False
 
     def resolved_worker_script(self) -> Path:
         if self.worker_script:
@@ -174,14 +173,37 @@ class WorkerBridge:
         self._lock = threading.RLock()
         self._next_id = 1
         self._handshake: dict[str, Any] | None = None
-        self._uncertain = False
+        # Two distinct facts, deliberately not one flag:
+        #   _worker_faulted   -- the CURRENT worker is unhealthy. Transient, and
+        #                        reset when a replacement starts. close() reads
+        #                        this to decide whether a graceful shutdown
+        #                        request is still worth sending.
+        #   _session_uncertain -- an operation completed with an UNKNOWN outcome
+        #                        in this session. A sticky safety fact: a fresh
+        #                        worker does not make a half-applied PLAXIS
+        #                        mutation certain, so only an explicit,
+        #                        successful reconnect clears it.
+        self._worker_faulted = False
+        self._session_uncertain = False
         self._secret_values: set[str] = set()
         if config.password:
             self._secret_values.add(config.password)
 
     @property
     def uncertain(self) -> bool:
-        return self._uncertain
+        return self._session_uncertain
+
+    @property
+    def worker_faulted(self) -> bool:
+        return self._worker_faulted
+
+    def clear_session_uncertainty(self) -> bool:
+        """Acknowledge the uncertain state; returns whether one was cleared."""
+
+        with self._lock:
+            recovered = self._session_uncertain
+            self._session_uncertain = False
+            return recovered
 
     @property
     def started(self) -> bool:
@@ -212,7 +234,10 @@ class WorkerBridge:
             interpreter = Path(self.config.worker_python).expanduser()
             self._validate_worker_integrity(script, interpreter)
 
-            self._uncertain = False
+            # A replacement worker clears the worker-health fault only. It must
+            # not clear _session_uncertain: restarting a process says nothing
+            # about whether the interrupted PLAXIS mutation landed.
+            self._worker_faulted = False
             self._stdout = queue.Queue()
             self._stderr_lines.clear()
             try:
@@ -303,12 +328,15 @@ class WorkerBridge:
         if not interpreter.is_file():
             raise WorkerStartupError("PLAXIS bundle Python executable was not found.")
 
-        if not self.config.trust_worker_script_path:
-            roots = self.config.trusted_script_roots()
-            if not any(script == root or root in script.parents for root in roots):
-                raise WorkerStartupError(
-                    "PLAXIS worker script is outside the installed PLAXIS-MCP directory."
-                )
+        # Deliberately not configurable. This is policy, not settings: a
+        # profile, environment, or deserializer must have no way to say "skip
+        # the integrity check". Tests override the roots by patching
+        # trusted_script_roots, which no production path can reach.
+        roots = self.config.trusted_script_roots()
+        if not any(script == root or root in script.parents for root in roots):
+            raise WorkerStartupError(
+                "PLAXIS worker script is outside the installed PLAXIS-MCP directory."
+            )
 
         expected_digest = self.config.worker_script_sha256
         if expected_digest:
@@ -351,7 +379,7 @@ class WorkerBridge:
     def close(self) -> None:
         """Stop the worker without leaking its output to the MCP host stdout."""
         with self._lock:
-            if self.started and not self._uncertain:
+            if self.started and not self._worker_faulted:
                 try:
                     self._request_started("shutdown", {}, min(self.config.startup_timeout, 2.0))
                 except BridgeError:
@@ -437,7 +465,8 @@ class WorkerBridge:
         )
 
     def _fault(self, error: BridgeError, cause: BaseException | None = None) -> None:
-        self._uncertain = True
+        self._worker_faulted = True
+        self._session_uncertain = True
         self._terminate()
         if cause is None:
             raise error
@@ -544,7 +573,13 @@ class BridgeSession:
             },
             timeout=self.config.startup_timeout,
         )
-        return self._require_object_result(result, "connect")
+        connected = self._require_object_result(result, "connect")
+        # Only a connect that actually succeeded may clear the uncertainty, and
+        # the caller is told that it did. Clearing a safety flag silently on a
+        # call an agent makes reflexively is how the flag stops meaning
+        # anything; a failed reconnect must leave it standing.
+        connected["recovered_from_uncertain"] = self._bridge.clear_session_uncertainty()
+        return connected
 
     def disconnect(self) -> dict[str, Any]:
         if not self._bridge.started:
@@ -554,7 +589,14 @@ class BridgeSession:
     def status(self) -> dict[str, Any]:
         if not self._bridge.started:
             return self._idle_status()
-        return self._require_object_result(self._bridge.request("status"), "status")
+        status = self._require_object_result(self._bridge.request("status"), "status")
+        # A replacement worker reports its own health honestly, but it cannot
+        # know that an earlier operation in this session ended with an
+        # unconfirmed outcome. The session fact outranks the worker's view,
+        # otherwise the uncertainty stays invisible until the next connect.
+        if self._bridge.uncertain:
+            status["state"] = "uncertain"
+        return status
 
     def invoke(self, operation: str, timeout: float | None = None, **params: Any) -> Any:
         """Dispatch a named PLAXIS domain operation through the worker."""
