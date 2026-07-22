@@ -4,7 +4,11 @@
 from pathlib import Path
 
 
-ROOT = Path(SPECPATH).resolve().parent.parent
+# SPECPATH is the directory holding this spec (packaging/), so the repository
+# root is exactly one level up. Going two levels up escapes the repository
+# entirely, which is easy to miss because the checkout directory repeats the
+# project name (PLAXIS-MCP/PLAXIS-MCP).
+ROOT = Path(SPECPATH).resolve().parent
 SRC = ROOT / "src"
 
 a = Analysis(

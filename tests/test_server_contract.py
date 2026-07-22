@@ -244,6 +244,23 @@ class ServerContractTests(unittest.TestCase):
             with self.assertRaises(ServerConfigurationError):
                 main(["serve", "--config", "unused.toml"])
 
+    def test_cli_delegates_subcommands_with_option_arguments(self):
+        """The packaged exe must pass option-like args through to the delegates.
+
+        A subparser using nargs=REMAINDER silently failed on the very form the
+        installer uses, so `plaxis-mcp profiles --output-dir X` aborted with
+        "unrecognized arguments" instead of delegating.
+        """
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("plaxis_mcp.server.profiles_main", return_value=0) as profiles:
+                self.assertEqual(main(["profiles", "--output-dir", r"C:\tmp\p"]), 0)
+            profiles.assert_called_once_with(["--output-dir", r"C:\tmp\p"])
+
+            with patch("plaxis_mcp.server.credentials_main", return_value=0) as credentials:
+                self.assertEqual(main(["credentials", "set", "--profile", r"C:\tmp\i.toml"]), 0)
+            credentials.assert_called_once_with(["set", "--profile", r"C:\tmp\i.toml"])
+
     def test_tool_arguments_are_strict_not_coerced(self):
         server, _ = self.make_server(PlaxisRole.OUTPUT)
 

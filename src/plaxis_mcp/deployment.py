@@ -479,7 +479,13 @@ def _registry_install_roots() -> Iterable[tuple[Path, str, str]]:
                     if name.lower() in _INSTALL_VALUE_NAMES and isinstance(value, str):
                         root = Path(value).expanduser()
                         if root.is_dir():
-                            found.append((root, hive_name + "\\" + key_path, key_path.rsplit("\\", 1)[-1]))
+                            # The value usually hangs off a generic subkey such
+                            # as ...\PLAXIS 2D CONNECT Edition V22\Install, so
+                            # the leaf key name is "Install" rather than a
+                            # product. The install directory carries the name a
+                            # user would recognise.
+                            product = root.name or key_path.rsplit("\\", 1)[-1]
+                            found.append((root, hive_name + "\\" + key_path, product))
             except OSError:
                 pass
             try:

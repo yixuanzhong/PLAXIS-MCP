@@ -5,20 +5,29 @@ The release build creates a signed PyInstaller one-directory artifact:
 ```text
 plaxis-mcp/
   plaxis-mcp.exe
-  worker/worker.py
-  worker/worker_runtime.py
-  profiles/input.toml
-  profiles/output.toml
   artifact-manifest.json
   licenses.json
+  _internal/
+    worker/worker.py
+    worker/worker_runtime.py
+    profiles/input.toml
+    profiles/output.toml
+    ... (Python runtime and dependencies)
 ```
+
+PyInstaller 6 one-directory builds place every `datas` entry under `_internal/`,
+not beside the executable. `sys._MEIPASS` points at `_internal/` in a frozen
+build, so `BridgeSessionConfig.resolved_worker_script` finds `worker/worker.py`
+there without any path assumption; the installed profiles are generated into
+`profiles/` next to the executable, not read from the bundled templates.
 
 `worker/` contains source only. It is started by the selected PLAXIS bundled
 Python and must never be compiled against, copied from, or installed into a
-Bentley/Seequent runtime. The packaged host should resolve that directory at
-runtime when frozen, rather than assuming a source checkout.
+Bentley/Seequent runtime.
 
-The templates contain no passwords. Installation generates role profiles with
+The bundled `profiles/` templates are non-loadable placeholders and exist only
+as documentation: their blank `worker_python` and `installation_root` fail the
+profile binding check by design. Installation generates real role profiles with
 the selected certified interpreter and a Credential Manager target.
 
 `scripts/install_windows.ps1` calls the packaged `profiles` command. It

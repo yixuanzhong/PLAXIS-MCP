@@ -711,20 +711,23 @@ def main(argv: list[str] | None = None) -> int:
             )
         return _run_stdio(config)
 
+    # These two own their own argument parsers. Dispatch before argparse sees
+    # them: a subparser using nargs=REMAINDER does not reliably capture leading
+    # option-like tokens, so "plaxis-mcp profiles --output-dir X" failed with
+    # "unrecognized arguments: --output-dir" instead of delegating.
+    if arguments[0] == "credentials":
+        return credentials_main(arguments[1:])
+    if arguments[0] == "profiles":
+        return profiles_main(arguments[1:])
+
     parser = argparse.ArgumentParser(prog="plaxis-mcp")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="Start a role-pinned stdio MCP server.")
     serve.add_argument("--config", required=True, type=Path, help="Generated input.toml or output.toml")
-    credentials = commands.add_parser("credentials", help="Store or remove a PLAXIS role password.")
-    credentials.add_argument("arguments", nargs=argparse.REMAINDER)
-    profiles = commands.add_parser("profiles", help="Discover PLAXIS and generate role profiles.")
-    profiles.add_argument("arguments", nargs=argparse.REMAINDER)
+    # Registered for --help discoverability only; both are dispatched above.
+    commands.add_parser("credentials", help="Store or remove a PLAXIS role password.")
+    commands.add_parser("profiles", help="Discover PLAXIS and generate role profiles.")
     namespace = parser.parse_args(arguments)
-
-    if namespace.command == "credentials":
-        return credentials_main(namespace.arguments)
-    if namespace.command == "profiles":
-        return profiles_main(namespace.arguments)
 
     _reject_profile_environment_overrides(os.environ)
     profile = load_profile(namespace.config)
