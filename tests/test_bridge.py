@@ -300,6 +300,45 @@ class WorkerRuntimeTests(unittest.TestCase):
         disconnected = runtime.handle_request({"protocol": 1, "id": 4, "operation": "disconnect", "params": {}})
         self.assertFalse(disconnected["result"]["connected"])
 
+    def test_connect_refuses_an_endpoint_that_is_not_plaxis(self) -> None:
+        """Any local service can occupy the configured port.
+
+        Observed live: port 10001 was held by a security agent answering as
+        "Qualys-Correlation", and connect reported a healthy PLAXIS session
+        because it only checked server.active.
+        """
+
+        class Impostor(FakeServer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.server_full_name = "Qualys-Correlation"
+
+        runtime = WorkerRuntime(role="input", new_server_factory=lambda **k: (Impostor(), object()))
+        response = runtime.handle_request(
+            {"protocol": 1, "id": 1, "operation": "connect",
+             "params": {"host": "127.0.0.1", "port": 10001, "password": "pw", "timeout": 5}}
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "WRONG_ENDPOINT")
+        self.assertIn("rotate", response["error"]["message"].lower())
+
+        status = runtime.handle_request({"protocol": 1, "id": 2, "operation": "status", "params": {}})
+        self.assertFalse(status["result"]["connected"])
+
+    def test_connect_refuses_the_other_plaxis_role(self) -> None:
+        class OutputServer(FakeServer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.server_full_name = "PLAXIS 2D Output/22.2.0.1078"
+
+        runtime = WorkerRuntime(role="input", new_server_factory=lambda **k: (OutputServer(), object()))
+        response = runtime.handle_request(
+            {"protocol": 1, "id": 1, "operation": "connect",
+             "params": {"host": "127.0.0.1", "port": 10001, "password": "pw", "timeout": 5}}
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "WRONG_ENDPOINT")
+
     def test_runtime_masks_connection_secret_and_rejects_unregistered_calls(self) -> None:
         def failing_factory(**kwargs):
             raise RuntimeError("could not connect using " + kwargs["password"])

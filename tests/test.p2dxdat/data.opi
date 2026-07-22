@@ -1,0 +1,18 @@
+﻿[Project]
+Description=
+Company=AECOM- CSS
+Version=70
+GravityDirection=2
+Comment=
+AssociatedProjectID={00000000-0000-0000-0000-000000000000}
+DatabaseFileName=
+PreviewFile=
+UnitLength=m
+UnitForce=kN
+UnitTime=day
+UnitMass=t
+UnitTemperature=K
+UnitEnergy=kJ
+UnitPower=kW
+UnitSystemVersion=0
+

@@ -378,12 +378,45 @@ class WorkerRuntime(object):
         self._transition("connected")
         result = self.status()
         if result["server_active"] is False:
-            self._close_session(self._server)
-            self._server = None
-            self._global_object = None
-            self._transition("disconnected", "SERVER_INACTIVE")
+            self._drop_session("SERVER_INACTIVE")
             raise WorkerError("CONNECTION_FAILED", "The PLAXIS scripting server is not active.")
+        identity_error = self._endpoint_identity_error(result.get("server_full_name"))
+        if identity_error:
+            self._drop_session("WRONG_ENDPOINT")
+            raise WorkerError("WRONG_ENDPOINT", identity_error)
         return result
+
+    def _drop_session(self, reason):
+        self._close_session(self._server)
+        self._server = None
+        self._global_object = None
+        self._transition("disconnected", reason)
+
+    def _endpoint_identity_error(self, server_full_name):
+        """Reject a port that is not the PLAXIS server this role expects.
+
+        Any local service can occupy the configured port, and the scripting
+        handshake sends the password before the peer is identified. Observed
+        live: an endpoint answering as "Qualys-Correlation" was accepted as a
+        healthy PLAXIS connection. Failing closed here does not un-send the
+        password, so the message tells the operator to treat it as exposed.
+        """
+
+        if not isinstance(server_full_name, str) or not server_full_name.strip():
+            return ("The service on this port did not identify itself as a PLAXIS scripting "
+                    "server. Treat the password for this endpoint as exposed and rotate it.")
+        name = server_full_name.lower()
+        if "plaxis" not in name:
+            return ("The service on this port is not a PLAXIS scripting server. Treat the "
+                    "password for this endpoint as exposed and rotate it.")
+        # Match only on an explicit contradiction: a server naming the other
+        # role is certainly wrong, while a build that omits the role word is
+        # not proof of a mismatch.
+        opposite = "output" if self.role == "input" else "input"
+        if opposite in name and self.role not in name:
+            return ("This profile is pinned to the PLAXIS %s endpoint but the server on this "
+                    "port is %s." % (self.role, opposite))
+        return None
 
     def disconnect(self):
         self._close_session(self._server)
