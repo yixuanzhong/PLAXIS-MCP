@@ -20,7 +20,10 @@ if (-not $DevelopmentUnsigned -and [string]::IsNullOrWhiteSpace($CertificateThum
     throw "A production artifact must be signed. Supply -CertificateThumbprint or use -DevelopmentUnsigned explicitly."
 }
 
-& $PythonExe @PythonArgs -m pip install --requirement $BuildLock
+# --require-hashes makes pip refuse any artifact whose SHA-256 is not the one
+# recorded in the lock, so a compromised or substituted wheel cannot enter a
+# release build. It also forces every dependency to be pinned and hashed.
+& $PythonExe @PythonArgs -m pip install --require-hashes --requirement $BuildLock
 & $PythonExe @PythonArgs (Join-Path $PSScriptRoot "verify_dependencies.py") --requirements $BuildLock
 & $PythonExe @PythonArgs -m PyInstaller --noconfirm --clean --distpath $OutRoot --workpath $WorkRoot $Spec
 
