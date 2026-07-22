@@ -98,7 +98,7 @@ from plaxis_mcp.worker_runtime import (
     ROLE_TOOL_ALLOWLISTS,
     WorkerError,
     WorkerRuntime,
-    call_global_command,
+    call_plaxis_command,
     parse_path,
     resolve_reference,
     resolve_reference_list,
@@ -143,7 +143,7 @@ class ReferenceResolutionTests(unittest.TestCase):
 
     plxscripting sends a plain Python string as a quoted TEXT LITERAL, not a
     reference, even when it names a real PLAXIS object (verified by reading
-    plxscripting's own param_to_string). call_global_command must therefore
+    plxscripting's own param_to_string). call_plaxis_command must therefore
     always receive already-resolved objects for reference-typed arguments,
     never the raw client-supplied string.
     """
@@ -189,7 +189,7 @@ class ReferenceResolutionTests(unittest.TestCase):
             with self.assertRaises(WorkerError):
                 resolve_reference_list(root, bad, "paths")
 
-    def test_call_global_command_receives_resolved_objects_end_to_end(self) -> None:
+    def test_call_plaxis_command_receives_resolved_objects_end_to_end(self) -> None:
         """activate(["Plate_1"], ["Phase_1"]) must reach PLAXIS with real
         objects in the argument lists, never the strings "Plate_1"/"Phase_1"
         -- a raw string there would be sent to PLAXIS as quoted text, which is
@@ -199,19 +199,19 @@ class ReferenceResolutionTests(unittest.TestCase):
         root.Phase_1 = type("Phase", (object,), {"Name": "Phase_1"})()
         objects = resolve_reference_list(root, ["Plate_1"], "paths")
         phases = resolve_reference_list(root, ["Phase_1"], "phases")
-        call_global_command(root, "activate", objects, phases)
+        call_plaxis_command(root, "activate", objects, phases)
 
         received_objects, received_phases = root.received
         self.assertIs(received_objects[0], root.Plate_1)
         self.assertIs(received_phases[0], root.Phase_1)
         self.assertNotIsInstance(received_objects[0], str)
 
-    def test_call_global_command_wraps_a_missing_command(self) -> None:
+    def test_call_plaxis_command_wraps_a_missing_command(self) -> None:
         root = self._root()
         with self.assertRaises(WorkerError):
-            call_global_command(root, "not_a_real_command")
+            call_plaxis_command(root, "not_a_real_command")
 
-    def test_call_global_command_wraps_a_plaxis_side_failure(self) -> None:
+    def test_call_plaxis_command_wraps_a_plaxis_side_failure(self) -> None:
         root = self._root()
 
         def failing():
@@ -219,7 +219,7 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         root.failing_command = failing
         with self.assertRaises(WorkerError):
-            call_global_command(root, "failing_command")
+            call_plaxis_command(root, "failing_command")
 
 
 class FakeServer:
@@ -253,6 +253,10 @@ class FakePhase:
         self.Identification = FakeProperty(name)
         self.TypeName = FakeProperty("Phase")
 
+    def setproperties(self, property_name, phase, value):
+        self.last_setproperties_call = (property_name, phase, value)
+        return True
+
 
 class FakeResultTypes:
     class SoilValues:
@@ -284,6 +288,54 @@ class FakeRoot:
     def getresults(self, phase, result_type, fem_type, smoothing=None):
         self.last_getresults_call = (phase, result_type, fem_type, smoothing)
         return list(range(250))
+
+    def phase(self, after_phase):
+        self.last_phase_call = ("phase", after_phase)
+        return FakePhase("NewPhase")
+
+    def insertphase(self, before_phase):
+        self.last_phase_call = ("insertphase", before_phase)
+        return FakePhase("NewPhase")
+
+    def setcurrentphase(self, phase):
+        self.last_setcurrentphase_call = phase
+        return True
+
+    def activate(self, objects, phases):
+        self.last_activate_call = (objects, phases)
+        return True
+
+    def deactivate(self, objects, phases):
+        self.last_deactivate_call = (objects, phases)
+        return True
+
+    def calculate(self, *phases):
+        self.last_calculate_call = phases
+        return True
+
+    def gotosoil(self):
+        self.last_mode_call = ("gotosoil",)
+        return True
+
+    def gotostructures(self):
+        self.last_mode_call = ("gotostructures",)
+        return True
+
+    def gotomesh(self, *args):
+        self.last_mode_call = ("gotomesh",) + args
+        return True
+
+    def gotowater(self, *args):
+        self.last_mode_call = ("gotowater",) + args
+        return True
+
+    def gotostages(self, *args):
+        self.last_mode_call = ("gotostages",) + args
+        return True
+
+    def mesh(self, *args):
+        self.last_mesh_call = args
+        return True
 
 
 class BridgeTests(unittest.TestCase):
@@ -400,7 +452,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         handshake = runtime.handle_request({"protocol": 1, "id": 1, "operation": "handshake", "params": {}})
         self.assertTrue(handshake["ok"])
         self.assertEqual(handshake["result"]["role"], "input")
-        self.assertEqual(len(handshake["result"]["operations"]), 13)
+        self.assertEqual(len(handshake["result"]["operations"]), 21)
 
         connected = runtime.handle_request(
             {
@@ -596,7 +648,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(not_connected["error"]["code"], "NOT_CONNECTED")
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 15)
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 23)
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 10)
 
         def factory(**kwargs):
@@ -706,6 +758,105 @@ class WorkerRuntimeTests(unittest.TestCase):
             roots[-1].last_getresults_call,
             (roots[-1].Phases[0], roots[-1].ResultTypes.Soil.Utot, "node", None),
         )
+
+    def test_create_phase_dispatches_to_phase_or_insertphase_by_position(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        after = self._call(runtime, "create_phase", reference_phase="Phases[0]")
+        self.assertTrue(after["ok"], after)
+        self.assertEqual(after["result"]["position"], "after")
+        self.assertEqual(root.last_phase_call, ("phase", root.Phases[0]))
+
+        before = self._call(runtime, "create_phase", reference_phase="Phases[1]", position="before")
+        self.assertTrue(before["ok"], before)
+        self.assertEqual(root.last_phase_call, ("insertphase", root.Phases[1]))
+
+    def test_set_current_phase_resolves_the_reference(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(runtime, "set_current_phase", phase="Phases[1]")
+        self.assertTrue(result["ok"], result)
+        self.assertIs(root.last_setcurrentphase_call, root.Phases[1])
+
+    def test_activate_and_deactivate_pass_resolved_lists_not_strings(self) -> None:
+        """activate's sequence-form signature -- "activate (obj...) (phase...)"
+        -- means the two resolved lists must reach PLAXIS as two arguments,
+        each a list of real objects, never the raw path strings."""
+
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(runtime, "activate", paths=["Phases[0]"], phases=["Phases[1]"])
+        self.assertTrue(result["ok"], result)
+        objects, phases = root.last_activate_call
+        self.assertEqual(objects, [root.Phases[0]])
+        self.assertEqual(phases, [root.Phases[1]])
+        self.assertNotIsInstance(objects[0], str)
+
+        deactivated = self._call(runtime, "deactivate", paths=["Phases[0]"], phases=["Phases[1]"])
+        self.assertTrue(deactivated["ok"], deactivated)
+        self.assertEqual(root.last_deactivate_call, ([root.Phases[0]], [root.Phases[1]]))
+
+    def test_calculate_star_unpacks_phases_unlike_activate(self) -> None:
+        """calculate's explicit-phases signature is variadic ("calculate
+        Phase_1 Phase_6"), not a parenthesised sequence -- the resolved
+        phases must arrive as separate positional arguments, not one list
+        argument, which is the opposite calling convention from activate."""
+
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        no_args = self._call(runtime, "calculate")
+        self.assertTrue(no_args["ok"], no_args)
+        self.assertEqual(root.last_calculate_call, ())
+
+        explicit = self._call(runtime, "calculate", phases=["Phases[0]", "Phases[1]"])
+        self.assertTrue(explicit["ok"], explicit)
+        self.assertEqual(root.last_calculate_call, (root.Phases[0], root.Phases[1]))
+
+    def test_set_phase_property_calls_setproperties_on_the_target_not_the_global_object(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(
+            runtime, "set_phase_property",
+            path="Phases[0]", property="Adjustprestress", phase="Phases[1]", value=True,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(root.Phases[0].last_setproperties_call, ("Adjustprestress", root.Phases[1], True))
+
+    def test_set_mode_dispatches_and_gates_force_new_intersection(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        soil = self._call(runtime, "set_mode", mode="soil")
+        self.assertTrue(soil["ok"], soil)
+        self.assertEqual(root.last_mode_call, ("gotosoil",))
+
+        # gotosoil/gotostructures take no parameters; force_new_intersection
+        # only applies to mesh/water/stages.
+        rejected = self._call(runtime, "set_mode", mode="soil", force_new_intersection=True)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error"]["code"], "INVALID_ARGUMENT")
+
+        mesh_mode = self._call(runtime, "set_mode", mode="mesh", force_new_intersection=True)
+        self.assertTrue(mesh_mode["ok"], mesh_mode)
+        self.assertEqual(root.last_mode_call, ("gotomesh", True))
+
+    def test_generate_mesh_requires_size_before_enhanced_refinement(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        bare = self._call(runtime, "generate_mesh")
+        self.assertTrue(bare["ok"], bare)
+        self.assertEqual(root.last_mesh_call, ())
+
+        rejected = self._call(runtime, "generate_mesh", enhanced_refinement=True)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error"]["code"], "INVALID_ARGUMENT")
+
+        full = self._call(runtime, "generate_mesh", relative_element_size=0.1, enhanced_refinement=True)
+        self.assertTrue(full["ok"], full)
+        self.assertEqual(root.last_mesh_call, (0.1, True))
 
     def test_private_path_or_method_is_rejected(self) -> None:
         def factory(**kwargs):

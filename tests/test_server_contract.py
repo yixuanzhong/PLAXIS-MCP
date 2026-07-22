@@ -97,6 +97,14 @@ class ServerContractTests(unittest.TestCase):
                 "close_project",
                 "recover_project",
                 "save_project",
+                "create_phase",
+                "set_current_phase",
+                "activate",
+                "deactivate",
+                "calculate",
+                "set_phase_property",
+                "set_mode",
+                "generate_mesh",
             },
         )
         self.assertEqual(

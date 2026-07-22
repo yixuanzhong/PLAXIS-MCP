@@ -19,6 +19,8 @@ COMMON_OPERATIONS = (
 )
 INPUT_OPERATIONS = COMMON_OPERATIONS + (
     "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project",
+    "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property",
+    "set_mode", "generate_mesh",
 )
 OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results")
 ROLE_OPERATION_ALLOWLISTS = {"input": INPUT_OPERATIONS, "output": OUTPUT_OPERATIONS}
@@ -135,18 +137,23 @@ def resolve_reference_list(global_object, values, label):
     return [resolve_reference(global_object, value, label) for value in values]
 
 
-def call_global_command(global_object, command_name, *args):
-    """Call a named PLAXIS global command with already-resolved arguments.
+def call_plaxis_command(target, command_name, *args):
+    """Call a named PLAXIS command on a target with already-resolved arguments.
 
-    Unlike call_method (which takes literal JSON args straight from an MCP
-    client), every argument here is expected to already be either a literal
-    value or a real PLAXIS object obtained via resolve_reference[_list] --
-    this is the shared call path for every first-class staged-construction,
-    geometry, structural-element, and material operation.
+    ``target`` is usually the global object (for a global command like
+    activate or calculate), but the same call shape works for a command
+    invoked on a resolved instance object -- setproperties's phase-scoped
+    form is called on the target object being modified, not on the global
+    object. Unlike call_method (which takes literal JSON args straight from
+    an MCP client), every argument here is expected to already be either a
+    literal value or a real PLAXIS object obtained via
+    resolve_reference[_list] -- this is the shared call path for every
+    first-class staged-construction, geometry, structural-element, and
+    material operation.
     """
 
     try:
-        command = getattr(global_object, command_name)
+        command = getattr(target, command_name)
     except Exception:
         raise WorkerError("PLAXIS_ERROR", "PLAXIS does not expose the '%s' command." % command_name)
     if not callable(command):
@@ -576,6 +583,14 @@ class WorkerRuntime(object):
             "close_project": lambda server, global_object, params: self._close_project(server),
             "recover_project": lambda server, global_object, params: self._recover_project(server),
             "save_project": lambda server, global_object, params: self._save_project(global_object, params),
+            "create_phase": lambda server, global_object, params: self._create_phase(global_object, params),
+            "set_current_phase": lambda server, global_object, params: self._set_current_phase(global_object, params),
+            "activate": lambda server, global_object, params: self._set_active(global_object, params, True),
+            "deactivate": lambda server, global_object, params: self._set_active(global_object, params, False),
+            "calculate": lambda server, global_object, params: self._calculate(global_object, params),
+            "set_phase_property": lambda server, global_object, params: self._set_phase_property(global_object, params),
+            "set_mode": lambda server, global_object, params: self._set_mode(global_object, params),
+            "generate_mesh": lambda server, global_object, params: self._generate_mesh(global_object, params),
             "list_result_types": lambda server, global_object, params: self._list_result_types(global_object, params),
             "get_results": lambda server, global_object, params: self._get_results(global_object, params),
         }
@@ -711,6 +726,119 @@ class WorkerRuntime(object):
                     "PLAXIS reported a save but no project file exists at the requested path.",
                 )
         return payload
+
+    # -- Staged construction (WP-D) ------------------------------------------
+    #
+    # PLAXIS documents "phase" and "insertphase" as two separate commands,
+    # each requiring a single reference phase (there is no zero-argument
+    # overload for either -- InitialPhase always exists, so a first real
+    # phase is always created relative to it). One tool with a position
+    # covers both rather than shipping two near-identical operations.
+
+    def _create_phase(self, global_object, params):
+        reference_phase = resolve_reference(global_object, params.get("reference_phase"), "reference_phase")
+        position = self._choice_string(params, "position", ("after", "before"), "after")
+        command_name = "phase" if position == "after" else "insertphase"
+        result = call_plaxis_command(global_object, command_name, reference_phase)
+        return {"position": position, "reference_phase": describe_value(reference_phase), "result": describe_value(result)}
+
+    def _set_current_phase(self, global_object, params):
+        phase = resolve_reference(global_object, params.get("phase"), "phase")
+        result = call_plaxis_command(global_object, "setcurrentphase", phase)
+        return {"phase": describe_value(phase), "result": describe_value(result)}
+
+    def _set_active(self, global_object, params, activate):
+        # activate/deactivate's sequence-form signature: <{1,...}: Activatable>'
+        # <{1,...}: Any>' -- a Python list argument is itself serialised as a
+        # parenthesised sequence by plxscripting, so the two resolved lists are
+        # passed straight through as the two positional arguments.
+        objects = resolve_reference_list(global_object, params.get("paths"), "paths")
+        phases = resolve_reference_list(global_object, params.get("phases"), "phases")
+        command_name = "activate" if activate else "deactivate"
+        result = call_plaxis_command(global_object, command_name, objects, phases)
+        return {
+            "action": command_name,
+            "paths": params.get("paths"),
+            "phases": params.get("phases"),
+            "result": describe_value(result),
+        }
+
+    def _calculate(self, global_object, params):
+        # calculate's explicit-phases signature is variadic ("calculate
+        # Phase_1 Phase_6"), not a parenthesised sequence like activate's --
+        # the resolved phases are star-unpacked into separate positional
+        # arguments, not passed as a single list argument.
+        phase_paths = params.get("phases")
+        if phase_paths is None:
+            result = call_plaxis_command(global_object, "calculate")
+        else:
+            phases = resolve_reference_list(global_object, phase_paths, "phases")
+            result = call_plaxis_command(global_object, "calculate", *phases)
+        return {"phases": phase_paths, "result": describe_value(result)}
+
+    def _set_phase_property(self, global_object, params):
+        # setproperties's phase-scoped signature is called ON the target
+        # object being modified (matching how setattr already routes through
+        # the target for the existing, non-phase-scoped set_property), not on
+        # the global object -- the phase is the third argument to that call.
+        target = resolve_reference(global_object, params.get("path"), "path")
+        property_name = self._required_string(params, "property")
+        phase = resolve_reference(global_object, params.get("phase"), "phase")
+        value = params.get("value")
+        result = call_plaxis_command(target, "setproperties", property_name, phase, value)
+        return {
+            "path": params.get("path"),
+            "property": property_name,
+            "phase": describe_value(phase),
+            "value": value,
+            "result": describe_value(result),
+        }
+
+    _MODE_COMMANDS = {
+        "soil": "gotosoil",
+        "structures": "gotostructures",
+        "mesh": "gotomesh",
+        "water": "gotowater",
+        "stages": "gotostages",
+    }
+    # gotosoil/gotostructures take no parameters; only these three modes
+    # additionally accept the optional force-new-intersection Boolean.
+    _MODES_SUPPORTING_FORCE_INTERSECTION = frozenset(("mesh", "water", "stages"))
+
+    def _set_mode(self, global_object, params):
+        mode = self._choice_string(params, "mode", self._MODE_COMMANDS.keys(), None)
+        force_new_intersection = self._optional_bool(params, "force_new_intersection")
+        if force_new_intersection is not None and mode not in self._MODES_SUPPORTING_FORCE_INTERSECTION:
+            raise WorkerError(
+                "INVALID_ARGUMENT",
+                "force_new_intersection is only meaningful for mode in: %s."
+                % ", ".join(sorted(self._MODES_SUPPORTING_FORCE_INTERSECTION)),
+            )
+        command_name = self._MODE_COMMANDS[mode]
+        args = () if force_new_intersection is None else (force_new_intersection,)
+        result = call_plaxis_command(global_object, command_name, *args)
+        return {"mode": mode, "result": describe_value(result)}
+
+    def _generate_mesh(self, global_object, params):
+        relative_element_size = self._optional_number(params, "relative_element_size")
+        enhanced_refinement = self._optional_bool(params, "enhanced_refinement")
+        if enhanced_refinement is not None and relative_element_size is None:
+            raise WorkerError(
+                "INVALID_ARGUMENT",
+                "enhanced_refinement requires relative_element_size to also be given.",
+            )
+        if relative_element_size is None:
+            args = ()
+        elif enhanced_refinement is None:
+            args = (relative_element_size,)
+        else:
+            args = (relative_element_size, enhanced_refinement)
+        result = call_plaxis_command(global_object, "mesh", *args)
+        return {
+            "relative_element_size": relative_element_size,
+            "enhanced_refinement": enhanced_refinement,
+            "result": describe_value(result),
+        }
 
     @staticmethod
     def _list_phases(global_object):

@@ -392,6 +392,24 @@ _CLOSE_SAVE = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=False,
 )
+# Switches which existing phase/mode is current; does not create, destroy, or
+# mutate model content, and repeating the same switch is a no-op.
+_MODE_SWITCH = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+# activate/deactivate/set_phase_property mutate staged-construction state.
+# Repeating the same call reaches the same end state (idempotent, like
+# set_property), but every mutator here still defaults to destructiveHint so
+# no client treats it as safe to auto-approve.
+_STAGE_MUTATOR = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 
 def _set_version(server: FastMCP) -> None:
@@ -638,6 +656,97 @@ def create_server(
             """Save the active project, optionally to an approved new path."""
 
             return _invoke(session, "save_project", filename=filename)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_phase(
+            reference_phase: Annotated[StrictStr, Field(min_length=1)],
+            position: Literal["after", "before"] = "after",
+        ) -> dict[str, Any]:
+            """Create a new phase relative to an existing one.
+
+            PLAXIS always has an InitialPhase; the first real phase is
+            typically created with reference_phase="InitialPhase".
+            """
+
+            return _invoke(session, "create_phase", reference_phase=reference_phase, position=position)
+
+        @server.tool(annotations=_MODE_SWITCH, structured_output=True)
+        def set_current_phase(phase: Annotated[StrictStr, Field(min_length=1)]) -> dict[str, Any]:
+            """Make an existing phase the current phase for further edits."""
+
+            return _invoke(session, "set_current_phase", phase=phase)
+
+        @server.tool(annotations=_STAGE_MUTATOR, structured_output=True)
+        def activate(
+            paths: Annotated[list[StrictStr], Field(min_length=1)],
+            phases: Annotated[list[StrictStr], Field(min_length=1)],
+        ) -> dict[str, Any]:
+            """Activate one or more objects in one or more phases."""
+
+            return _invoke(session, "activate", paths=paths, phases=phases)
+
+        @server.tool(annotations=_STAGE_MUTATOR, structured_output=True)
+        def deactivate(
+            paths: Annotated[list[StrictStr], Field(min_length=1)],
+            phases: Annotated[list[StrictStr], Field(min_length=1)],
+        ) -> dict[str, Any]:
+            """Deactivate one or more objects in one or more phases."""
+
+            return _invoke(session, "deactivate", paths=paths, phases=phases)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def calculate(phases: list[Annotated[StrictStr, Field(min_length=1)]] | None = None) -> dict[str, Any]:
+            """Calculate phases.
+
+            Omit phases to calculate every phase currently marked for
+            calculation; provide phases to calculate exactly those phases
+            regardless of their marked-for-calculation state.
+            """
+
+            return _invoke(session, "calculate", phases=phases)
+
+        @server.tool(annotations=_STAGE_MUTATOR, structured_output=True)
+        def set_phase_property(
+            path: Annotated[StrictStr, Field(min_length=1)],
+            property: Annotated[StrictStr, Field(min_length=1)],
+            phase: Annotated[StrictStr, Field(min_length=1)],
+            value: JsonValue,
+        ) -> dict[str, Any]:
+            """Set a property of an object for one specific phase only.
+
+            This is PLAXIS's phase-scoped setproperties form, distinct from
+            set_property, which changes a property without phase scoping.
+            """
+
+            return _invoke(session, "set_phase_property", path=path, property=property, phase=phase, value=value)
+
+        @server.tool(annotations=_MODE_SWITCH, structured_output=True)
+        def set_mode(
+            mode: Literal["soil", "structures", "mesh", "water", "stages"],
+            force_new_intersection: StrictBool | None = None,
+        ) -> dict[str, Any]:
+            """Switch the PLAXIS Input working mode.
+
+            force_new_intersection is only meaningful for mode "mesh",
+            "water", or "stages"; it is rejected for "soil" or "structures".
+            """
+
+            return _invoke(session, "set_mode", mode=mode, force_new_intersection=force_new_intersection)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def generate_mesh(
+            relative_element_size: Annotated[StrictFloat, Field(gt=0)] | None = None,
+            enhanced_refinement: StrictBool | None = None,
+        ) -> dict[str, Any]:
+            """Generate the mesh, optionally with a relative element size factor.
+
+            enhanced_refinement requires relative_element_size to also be given.
+            """
+
+            return _invoke(
+                session, "generate_mesh",
+                relative_element_size=relative_element_size, enhanced_refinement=enhanced_refinement,
+            )
 
     else:
 
