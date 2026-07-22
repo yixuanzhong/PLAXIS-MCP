@@ -101,6 +101,62 @@ def resolve_path(root, path):
     return value
 
 
+def resolve_reference(global_object, value, label):
+    """Resolve one JSON-supplied name/path into a real PLAXIS object.
+
+    plxscripting builds every command call as a command-line string
+    (server.py:param_to_string): a real PLAXIS object serialises as its bare
+    identifier, but a plain Python string is wrapped in quotes and sent as a
+    TEXT LITERAL, not a reference -- even when the string names a real
+    object. A JSON-supplied name must therefore be resolved into the actual
+    object here, before it is ever passed on to a PLAXIS command; passing the
+    raw string through (as call_method does, by design, for literal-only
+    commands) would silently do the wrong thing for any command expecting an
+    object or phase argument.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise WorkerError("INVALID_ARGUMENT", "%s must be a non-empty PLAXIS object path." % label)
+    return resolve_path(global_object, value)
+
+
+def resolve_reference_list(global_object, values, label):
+    """Resolve a JSON array of paths for PLAXIS's "(obj1 obj2)" sequence form.
+
+    A Python list of resolved objects passed as a single command argument is
+    itself serialised by plxscripting as a parenthesised sequence, matching
+    commands such as "activate (Plate_1 Plate_2) (Phase_1 Phase_2)" -- so the
+    caller can pass the returned list straight through as one positional
+    argument.
+    """
+
+    if not isinstance(values, list) or not values:
+        raise WorkerError("INVALID_ARGUMENT", "%s must be a non-empty array of PLAXIS object paths." % label)
+    return [resolve_reference(global_object, value, label) for value in values]
+
+
+def call_global_command(global_object, command_name, *args):
+    """Call a named PLAXIS global command with already-resolved arguments.
+
+    Unlike call_method (which takes literal JSON args straight from an MCP
+    client), every argument here is expected to already be either a literal
+    value or a real PLAXIS object obtained via resolve_reference[_list] --
+    this is the shared call path for every first-class staged-construction,
+    geometry, structural-element, and material operation.
+    """
+
+    try:
+        command = getattr(global_object, command_name)
+    except Exception:
+        raise WorkerError("PLAXIS_ERROR", "PLAXIS does not expose the '%s' command." % command_name)
+    if not callable(command):
+        raise WorkerError("PLAXIS_ERROR", "PLAXIS '%s' is not a callable command." % command_name)
+    try:
+        return command(*args)
+    except Exception:
+        raise WorkerError("PLAXIS_ERROR", "PLAXIS could not execute '%s'." % command_name)
+
+
 def read_member_value(obj, name):
     try:
         value = getattr(obj, name)

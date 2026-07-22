@@ -98,7 +98,10 @@ from plaxis_mcp.worker_runtime import (
     ROLE_TOOL_ALLOWLISTS,
     WorkerError,
     WorkerRuntime,
+    call_global_command,
     parse_path,
+    resolve_reference,
+    resolve_reference_list,
 )
 
 
@@ -133,6 +136,90 @@ class ParsePathTests(unittest.TestCase):
         for path in (".Foo", "Foo..Bar", "Foo[1]..Bar"):
             with self.assertRaises(WorkerError):
                 parse_path(path)
+
+
+class ReferenceResolutionTests(unittest.TestCase):
+    """The central WP-C fix: a JSON name must resolve to a real object.
+
+    plxscripting sends a plain Python string as a quoted TEXT LITERAL, not a
+    reference, even when it names a real PLAXIS object (verified by reading
+    plxscripting's own param_to_string). call_global_command must therefore
+    always receive already-resolved objects for reference-typed arguments,
+    never the raw client-supplied string.
+    """
+
+    class Plate(object):
+        def __init__(self, name):
+            self.Name = name
+
+    def _root(self):
+        root = type("Root", (object,), {})()
+        root.Plate_1 = self.Plate("Plate_1")
+        root.Plate_2 = self.Plate("Plate_2")
+        root.received = None
+
+        def activate(objects, phases):
+            root.received = (objects, phases)
+            return True
+
+        root.activate = activate
+        return root
+
+    def test_resolve_reference_returns_the_real_object_not_the_name(self) -> None:
+        root = self._root()
+        resolved = resolve_reference(root, "Plate_1", "path")
+        self.assertIs(resolved, root.Plate_1)
+        self.assertIsInstance(resolved, self.Plate)
+
+    def test_resolve_reference_rejects_non_string_and_empty(self) -> None:
+        root = self._root()
+        for bad in (None, 3, "", ["Plate_1"]):
+            with self.assertRaises(WorkerError):
+                resolve_reference(root, bad, "path")
+
+    def test_resolve_reference_list_returns_real_objects_for_sequence_form(self) -> None:
+        root = self._root()
+        resolved = resolve_reference_list(root, ["Plate_1", "Plate_2"], "paths")
+        self.assertEqual(resolved, [root.Plate_1, root.Plate_2])
+        self.assertIsInstance(resolved[0], self.Plate)
+
+    def test_resolve_reference_list_rejects_non_list_and_empty(self) -> None:
+        root = self._root()
+        for bad in (None, "Plate_1", []):
+            with self.assertRaises(WorkerError):
+                resolve_reference_list(root, bad, "paths")
+
+    def test_call_global_command_receives_resolved_objects_end_to_end(self) -> None:
+        """activate(["Plate_1"], ["Phase_1"]) must reach PLAXIS with real
+        objects in the argument lists, never the strings "Plate_1"/"Phase_1"
+        -- a raw string there would be sent to PLAXIS as quoted text, which is
+        not a reference and would silently activate nothing."""
+
+        root = self._root()
+        root.Phase_1 = type("Phase", (object,), {"Name": "Phase_1"})()
+        objects = resolve_reference_list(root, ["Plate_1"], "paths")
+        phases = resolve_reference_list(root, ["Phase_1"], "phases")
+        call_global_command(root, "activate", objects, phases)
+
+        received_objects, received_phases = root.received
+        self.assertIs(received_objects[0], root.Plate_1)
+        self.assertIs(received_phases[0], root.Phase_1)
+        self.assertNotIsInstance(received_objects[0], str)
+
+    def test_call_global_command_wraps_a_missing_command(self) -> None:
+        root = self._root()
+        with self.assertRaises(WorkerError):
+            call_global_command(root, "not_a_real_command")
+
+    def test_call_global_command_wraps_a_plaxis_side_failure(self) -> None:
+        root = self._root()
+
+        def failing():
+            raise RuntimeError("boom")
+
+        root.failing_command = failing
+        with self.assertRaises(WorkerError):
+            call_global_command(root, "failing_command")
 
 
 class FakeServer:
