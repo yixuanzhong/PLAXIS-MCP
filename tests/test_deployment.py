@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -80,6 +81,7 @@ class DeploymentTests(unittest.TestCase):
             runtime_profile=LEGACY_38,
         )
 
+    @unittest.skipIf(sys.version_info < (3, 11), "Profile parsing needs stdlib tomllib (3.11+).")
     def test_profiles_are_secret_free_and_literal_loopback_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             installation = self._fake_installation(Path(temporary) / "V22")
@@ -109,6 +111,7 @@ class DeploymentTests(unittest.TestCase):
                 credential_target=credential_target_for(Path("C:/PLAXIS/OTHER"), "input"),
             )
 
+    @unittest.skipIf(sys.version_info < (3, 11), "Profile parsing needs stdlib tomllib (3.11+).")
     def test_worker_python_must_be_linked_to_the_installation_root(self):
         """The stored password must not reach an arbitrary executable."""
 
@@ -125,8 +128,11 @@ class DeploymentTests(unittest.TestCase):
             profile_file.write_text(redirected, encoding="utf-8")
 
             # The credential target is untouched, so only the interpreter
-            # allowlist can catch this.
-            with self.assertRaises(ProfileError):
+            # allowlist can catch this. Match the message: on an unsupported
+            # host every load_profile call raises ProfileError for a missing
+            # tomllib, which would make a bare assertRaises pass even if the
+            # binding check were deleted.
+            with self.assertRaisesRegex(ProfileError, "not linked to this profile"):
                 load_profile(profile_file)
 
     def test_profile_with_secret_is_rejected(self):

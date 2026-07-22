@@ -117,18 +117,27 @@ def describe_value(value, depth=0, max_depth=4, max_items=100):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else {"kind": "non_finite_number"}
+    # Truncation is always reported out of band, and only ever wraps the value
+    # when something was actually dropped. An in-band marker (a "_truncated"
+    # key, or a sentinel appended into the sequence itself) forces every
+    # consumer to type-check each element, and a caller that sums or counts a
+    # clipped sequence silently gets a wrong answer -- the exact failure the
+    # no-silent-truncation rule exists to prevent.
     if isinstance(value, dict):
         items = list(value.items())
-        result = {str(key): describe_value(item, depth + 1, max_depth, max_items) for key, item in items[:max_items]}
-        if len(items) > max_items:
-            result["_truncated"] = True
-        return result
+        described = {
+            str(key): describe_value(item, depth + 1, max_depth, max_items)
+            for key, item in items[:max_items]
+        }
+        if len(items) <= max_items:
+            return described
+        return {"kind": "mapping", "count": len(items), "truncated": True, "items": described}
     if isinstance(value, (list, tuple, set)):
         values = list(value)
-        result = [describe_value(item, depth + 1, max_depth, max_items) for item in values[:max_items]]
-        if len(values) > max_items:
-            result.append({"kind": "truncated", "count": len(values)})
-        return result
+        described = [describe_value(item, depth + 1, max_depth, max_items) for item in values[:max_items]]
+        if len(values) <= max_items:
+            return described
+        return {"kind": "sequence", "count": len(values), "truncated": True, "items": described}
     if hasattr(value, "value"):
         try:
             return {"kind": "property", "value": describe_value(value.value, depth + 1, max_depth, max_items)}
@@ -738,7 +747,15 @@ class WorkerRuntime(object):
 
     @staticmethod
     def _timestamp():
-        return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        # utcnow() is deprecated from 3.12, and datetime.UTC does not exist
+        # before 3.11 -- timezone.utc is the one spelling valid across the whole
+        # 3.7-3.13 worker range. Dropping tzinfo keeps the trailing "Z" form.
+        return (
+            datetime.datetime.now(datetime.timezone.utc)
+            .replace(tzinfo=None, microsecond=0)
+            .isoformat()
+            + "Z"
+        )
 
     @staticmethod
     def _safe_attestation_value(value):

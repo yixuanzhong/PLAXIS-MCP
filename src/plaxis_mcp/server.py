@@ -438,7 +438,11 @@ def _bridge_error_result(
     elif isinstance(error, WorkerStartupError):
         code, retryable, state = "CONNECTION_FAILED", True, _safe_error_state(session, config)
     elif isinstance(error, WorkerProtocolError):
-        code, retryable, state = "CANCELLED_OUTCOME_UNKNOWN", False, "uncertain"
+        # Corruption is not cancellation. Reporting it as CANCELLED_OUTCOME_UNKNOWN
+        # tells an agent a human intended the interruption, and would make a real
+        # client cancellation indistinguishable from a malformed worker record.
+        # The uncertain state is what carries the safety meaning here.
+        code, retryable, state = "PROTOCOL_ERROR", False, "uncertain"
     else:
         code, retryable, state = "PLAXIS_ERROR", False, _safe_error_state(session, config)
     payload = {

@@ -146,6 +146,21 @@ def _stream_lines(stream: Any, destination: queue.Queue[Any]) -> None:
         destination.put(_STREAM_CLOSED)
 
 
+def _retain_lines(stream: Any, destination: deque[str]) -> None:
+    """Keep only the most recent worker diagnostics.
+
+    Worker stderr is unbounded and nothing consumes it synchronously, so it is
+    retained in a bounded ring rather than a queue: the old code pushed every
+    line into a ``Queue`` that was never read, which grew for the lifetime of
+    the process and still left startup failures with no diagnostics attached.
+    """
+
+    for line in iter(stream.readline, ""):
+        stripped = line.rstrip("\r\n")
+        if stripped:
+            destination.append(stripped)
+
+
 class WorkerBridge:
     """Low-level, serialized JSON-lines transport for a PLAXIS worker."""
 
@@ -153,7 +168,6 @@ class WorkerBridge:
         self.config = config
         self._process: subprocess.Popen[str] | None = None
         self._stdout: queue.Queue[Any] = queue.Queue()
-        self._stderr: queue.Queue[Any] = queue.Queue()
         self._stderr_lines: deque[str] = deque(maxlen=20)
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -200,7 +214,6 @@ class WorkerBridge:
 
             self._uncertain = False
             self._stdout = queue.Queue()
-            self._stderr = queue.Queue()
             self._stderr_lines.clear()
             try:
                 self._process = subprocess.Popen(
@@ -227,8 +240,8 @@ class WorkerBridge:
                 daemon=True,
             )
             self._stderr_thread = threading.Thread(
-                target=_stream_lines,
-                args=(self._process.stderr, self._stderr),
+                target=_retain_lines,
+                args=(self._process.stderr, self._stderr_lines),
                 name="plaxis-worker-stderr",
                 daemon=True,
             )
@@ -350,7 +363,11 @@ class WorkerBridge:
     def _request_started(self, operation: str, params: Mapping[str, Any], timeout: float) -> Any:
         process = self._process
         if process is None or process.poll() is not None or process.stdin is None:
-            self._fault(WorkerStartupError("PLAXIS worker exited before responding."))
+            self._fault(
+                WorkerStartupError(
+                    self._worker_diagnostics("PLAXIS worker exited before responding.")
+                )
+            )
 
         self._remember_secrets(params)
         request_id = self._next_id
@@ -380,7 +397,11 @@ class WorkerBridge:
         except queue.Empty as exc:
             self._fault(WorkerTimeoutError("PLAXIS worker operation timed out."), exc)
         if line is _STREAM_CLOSED:
-            self._fault(WorkerStartupError("PLAXIS worker exited before responding."))
+            self._fault(
+                WorkerStartupError(
+                    self._worker_diagnostics("PLAXIS worker exited before responding.")
+                )
+            )
         if not isinstance(line, str):
             self._fault(WorkerProtocolError("PLAXIS worker emitted an invalid stream record."))
         try:
@@ -468,6 +489,19 @@ class WorkerBridge:
         elif isinstance(value, (list, tuple)):
             for item in value:
                 self._remember_secrets(item, key)
+
+    def _worker_diagnostics(self, message: str) -> str:
+        """Attach recent worker stderr so a dead worker is diagnosable.
+
+        Best effort: the reader thread may not have drained the pipe yet when
+        the process dies. Always redacted, because a worker traceback can echo
+        a connect password.
+        """
+
+        lines = [line for line in list(self._stderr_lines)[-5:] if line]
+        if not lines:
+            return message
+        return "%s Recent worker output: %s" % (message, self._redact(" | ".join(lines)))
 
     def _redact(self, message: str) -> str:
         redacted = message

@@ -704,7 +704,14 @@ class WindowsCredentialStore:
 
 def _target_from_args(parser: argparse.ArgumentParser, namespace: argparse.Namespace) -> str:
     if namespace.profile:
-        return load_profile(namespace.profile).credential_target
+        # Removing a stored password must keep working after PLAXIS has been
+        # moved or uninstalled, otherwise the operator is locked out of the
+        # cleanup and the secret stays behind. Only storing one needs a
+        # verified installation.
+        return load_profile(
+            namespace.profile,
+            verify_installation=namespace.action != "delete",
+        ).credential_target
     if namespace.target:
         WindowsCredentialStore._validate_target(namespace.target)
         return namespace.target
