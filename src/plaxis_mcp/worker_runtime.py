@@ -750,7 +750,7 @@ class WorkerRuntime(object):
         reference_phase = resolve_reference(global_object, params.get("reference_phase"), "reference_phase")
         position = self._choice_string(params, "position", ("after", "before"), "after")
         command_name = "phase" if position == "after" else "insertphase"
-        result = call_plaxis_command(global_object, command_name, reference_phase)
+        result = self._call_in_mode(global_object, "stages", command_name, reference_phase)
         return {"position": position, "reference_phase": describe_value(reference_phase), "result": describe_value(result)}
 
     def _set_current_phase(self, global_object, params):
@@ -781,10 +781,10 @@ class WorkerRuntime(object):
         # arguments, not passed as a single list argument.
         phase_paths = params.get("phases")
         if phase_paths is None:
-            result = call_plaxis_command(global_object, "calculate")
+            result = self._call_in_mode(global_object, "stages", "calculate")
         else:
             phases = resolve_reference_list(global_object, phase_paths, "phases")
-            result = call_plaxis_command(global_object, "calculate", *phases)
+            result = self._call_in_mode(global_object, "stages", "calculate", *phases)
         return {"phases": phase_paths, "result": describe_value(result)}
 
     def _set_phase_property(self, global_object, params):
@@ -830,6 +830,18 @@ class WorkerRuntime(object):
         result = call_plaxis_command(global_object, command_name, *args)
         return {"mode": mode, "result": describe_value(result)}
 
+    def _call_in_mode(self, global_object, required_mode, command_name, *args):
+        # Ensure PLAXIS Input is in the mode where this command actually
+        # executes, then run it -- so a caller need not precede every
+        # mesh/phase/calculate call with set_mode. Attribute exposure is NOT a
+        # reliable readiness signal: "mesh", for one, is attribute-visible in
+        # stages mode yet only *executes* in mesh mode (raising
+        # "could not execute 'mesh'"). So switch unconditionally; gotoX is an
+        # idempotent mode-set, and it shares the geometry precondition every
+        # mode-scoped op here already requires.
+        call_plaxis_command(global_object, self._MODE_COMMANDS[required_mode])
+        return call_plaxis_command(global_object, command_name, *args)
+
     def _generate_mesh(self, global_object, params):
         relative_element_size = self._optional_number(params, "relative_element_size")
         enhanced_refinement = self._optional_bool(params, "enhanced_refinement")
@@ -844,7 +856,11 @@ class WorkerRuntime(object):
             args = (relative_element_size,)
         else:
             args = (relative_element_size, enhanced_refinement)
-        result = call_plaxis_command(global_object, "mesh", *args)
+        # "mesh" is exposed only in mesh mode; _call_in_mode enters it
+        # automatically. The un-prefixed "mesh" is correct: the command-line's
+        # "_mesh" primitive is a different namespace and is NOT reachable via
+        # the plxscripting proxy's attribute lookup.
+        result = self._call_in_mode(global_object, "mesh", "mesh", *args)
         return {
             "relative_element_size": relative_element_size,
             "enhanced_refinement": enhanced_refinement,

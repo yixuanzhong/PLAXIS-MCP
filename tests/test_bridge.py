@@ -972,6 +972,9 @@ class WorkerRuntimeTests(unittest.TestCase):
         full = self._call(runtime, "generate_mesh", relative_element_size=0.1, enhanced_refinement=True)
         self.assertTrue(full["ok"], full)
         self.assertEqual(root.last_mesh_call, (0.1, True))
+        # F5: "mesh" only *executes* in mesh mode (it is attribute-visible but
+        # not runnable in stages mode), so generate_mesh enters mesh mode first.
+        self.assertEqual(root.last_mode_call[0], "gotomesh")
 
     def test_create_point_passes_literal_coordinate_tuples(self) -> None:
         root = FakeRoot()
