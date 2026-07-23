@@ -80,10 +80,14 @@ jobs:
         # The registry proves ownership by finding this line in the README that
         # PyPI serves, so a build that dropped it would publish fine and then
         # fail the registry step with a confusing permissions error.
+        # The sdist carries two PKG-INFO members, so piping straight into
+        # `grep -q` leaves tar writing into a pipe grep already closed on the
+        # first match: tar exits 2 and pipefail fails the step even though the
+        # marker was found. Extract first, then match.
         run: |
           set -euo pipefail
-          tar -xzOf dist/*.tar.gz --wildcards '*/PKG-INFO' \
-            | grep -q 'mcp-name: io.github.yixuanzhong/plaxis-mcp'
+          tar -xzOf dist/*.tar.gz --wildcards '*/PKG-INFO' > "$RUNNER_TEMP/pkg-info.txt"
+          grep -q 'mcp-name: io.github.yixuanzhong/plaxis-mcp' "$RUNNER_TEMP/pkg-info.txt"
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-registry:
