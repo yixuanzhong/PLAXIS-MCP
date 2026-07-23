@@ -261,11 +261,10 @@ profile.
 ---
 
 <div align="center">
-<sub>
 
-MIT licensed. PLAXIS is a trademark of Seequent and related companies.<br>
+MIT licensed. PLAXIS is a trademark of Seequent and related companies.
+
 This independent integration is not affiliated with, endorsed by, or sponsored by
 Seequent or Bentley Systems.
 
-</sub>
 </div>
