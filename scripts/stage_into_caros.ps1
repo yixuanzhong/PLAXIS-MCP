@@ -2,6 +2,7 @@
 param(
     [string]$CarosDesktopDir = "..\..\caros\caros\ui\desktop",
     [string]$CertificateThumbprint = "3B069415B5234C8F2CCF981396FC97AB37CFAE0C",
+    [string]$SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
     [switch]$SkipBuild
 )
 
@@ -22,7 +23,8 @@ if (-not (Test-Path -LiteralPath $Preflight -PathType Leaf)) {
 }
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "build_windows.ps1") -CertificateThumbprint $CertificateThumbprint
+    & (Join-Path $PSScriptRoot "build_windows.ps1") `
+        -CertificateThumbprint $CertificateThumbprint -SignTool $SignTool
     if ($LASTEXITCODE -ne 0) {
         throw "build_windows.ps1 failed with exit code $LASTEXITCODE"
     }

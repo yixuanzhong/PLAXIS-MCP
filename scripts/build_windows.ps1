@@ -6,6 +6,9 @@ param(
     [string]$WorkPath = "build\pyinstaller",
     [string]$CertificateThumbprint,
     [string]$TimestampUrl = "http://timestamp.digicert.com",
+    # The Windows SDK is not on PATH by default, so accept its usual location
+    # rather than failing the release build on an environment detail.
+    [string]$SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
     [switch]$DevelopmentUnsigned
 )
 
@@ -34,8 +37,10 @@ if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
 }
 
 if (-not $DevelopmentUnsigned) {
-    $SignTool = Get-Command signtool.exe -ErrorAction Stop
-    & $SignTool.Source sign /fd SHA256 /sha1 $CertificateThumbprint /tr $TimestampUrl /td SHA256 $Executable
+    if (-not (Test-Path -LiteralPath $SignTool -PathType Leaf)) {
+        $SignTool = (Get-Command signtool.exe -ErrorAction Stop).Source
+    }
+    & $SignTool sign /fd SHA256 /sha1 $CertificateThumbprint /tr $TimestampUrl /td SHA256 $Executable
     if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
     $Signature = Get-AuthenticodeSignature -LiteralPath $Executable
     if ([string]$Signature.Status -ne "Valid") {
