@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plaxis-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Client-neutral stdio MCP server for PLAXIS Remote Scripting"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -36,6 +36,7 @@ Repository = "https://github.com/yixuanzhong/PLAXIS-MCP"
 plaxis-mcp = "plaxis_mcp.server:main"
 plaxis-mcp-credentials = "plaxis_mcp.deployment:credentials_main"
 plaxis-mcp-profiles = "plaxis_mcp.deployment:profiles_main"
+plaxis-mcp-setup = "plaxis_mcp.deployment:setup_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,11 +1,17 @@
 import asyncio
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
+from plaxis_mcp import __version__
 from plaxis_mcp.bridge import WorkerOperationError
-from plaxis_mcp.deployment import EndpointProfile, credential_target_for
+from plaxis_mcp.deployment import (
+    EndpointProfile,
+    credential_target_for,
+    default_profile_directory,
+)
 from mcp.server.fastmcp.exceptions import ToolError
 from plaxis_mcp.server import (
     PlaxisRole,
@@ -309,6 +315,64 @@ class ServerContractTests(unittest.TestCase):
             with patch("plaxis_mcp.server.credentials_main", return_value=0) as credentials:
                 self.assertEqual(main(["credentials", "set", "--profile", r"C:\tmp\i.toml"]), 0)
             credentials.assert_called_once_with(["set", "--profile", r"C:\tmp\i.toml"])
+
+            with patch("plaxis_mcp.server.setup_main", return_value=0) as setup:
+                self.assertEqual(main(["setup", "--accept-legacy-37"]), 0)
+            setup.assert_called_once_with(["--accept-legacy-37"])
+
+    def test_version_reports_the_package_version_without_serving(self):
+        # The Caros packaging preflight reads this to catch a stale staged
+        # bundle, so it must work even where the transport is misconfigured.
+        with patch.dict("os.environ", {"PLAXIS_MCP_TRANSPORT": "sse"}, clear=True):
+            with patch("builtins.print") as printed:
+                self.assertEqual(main(["--version"]), 0)
+        printed.assert_called_once_with("plaxis-mcp %s" % __version__)
+
+    def test_serve_role_resolves_the_profile_from_the_profiles_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = Path(directory) / "input.toml"
+            profile_path.write_text("", encoding="utf-8")
+
+            with patch.dict("os.environ", {}, clear=True):
+                with patch("plaxis_mcp.server.load_profile") as load:
+                    with patch("plaxis_mcp.server.server_config_from_profile") as build:
+                        with patch("plaxis_mcp.server._run_stdio", return_value=0) as run:
+                            self.assertEqual(
+                                main(["serve", "--role", "input", "--profile-dir", directory]), 0
+                            )
+            load.assert_called_once_with(profile_path)
+            build.assert_called_once_with(load.return_value)
+            run.assert_called_once_with(build.return_value)
+
+    def test_serve_role_defaults_to_the_shared_profiles_directory(self):
+        with tempfile.TemporaryDirectory() as local_app_data:
+            expected = default_profile_directory({"LOCALAPPDATA": local_app_data}) / "output.toml"
+            expected.parent.mkdir(parents=True)
+            expected.write_text("", encoding="utf-8")
+
+            with patch.dict("os.environ", {"LOCALAPPDATA": local_app_data}, clear=True):
+                with patch("plaxis_mcp.server.load_profile") as load:
+                    with patch("plaxis_mcp.server.server_config_from_profile"):
+                        with patch("plaxis_mcp.server._run_stdio", return_value=0):
+                            self.assertEqual(main(["serve", "--role", "output"]), 0)
+            load.assert_called_once_with(expected)
+
+    def test_serve_role_without_a_generated_profile_names_the_setup_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaises(ServerConfigurationError) as raised:
+                    main(["serve", "--role", "input", "--profile-dir", directory])
+        self.assertIn("plaxis-mcp setup", str(raised.exception))
+
+    def test_serve_requires_exactly_one_profile_source(self):
+        for arguments in (
+            ["serve"],
+            ["serve", "--config", "i.toml", "--role", "input"],
+            ["serve", "--config", "i.toml", "--profile-dir", "."],
+        ):
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaises(SystemExit):
+                    main(arguments)
 
     def test_tool_arguments_are_strict_not_coerced(self):
         server, _ = self.make_server(PlaxisRole.OUTPUT)

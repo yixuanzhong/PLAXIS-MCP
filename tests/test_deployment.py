@@ -18,10 +18,13 @@ from plaxis_mcp.deployment import (
     RuntimeProfileError,
     credential_target_for,
     credentials_main,
+    default_profile_directory,
     discover_plaxis_installations,
     load_profile,
+    profile_path_for_role,
     runtime_profile_for_python,
     select_installation,
+    setup_main,
     validate_worker_attestation,
     write_role_profiles,
 )
@@ -191,6 +194,68 @@ password = \"do-not-store\"
     def test_credential_targets_are_role_specific(self):
         root = Path("C:/PLAXIS/V22")
         self.assertNotEqual(credential_target_for(root, "input"), credential_target_for(root, "output"))
+
+    def test_default_profile_paths_are_shared_by_every_client(self):
+        environment = {"LOCALAPPDATA": r"C:\Users\Someone\AppData\Local"}
+        directory = default_profile_directory(environment)
+
+        self.assertEqual(directory.parts[-3:], ("Caros", "PLAXIS-MCP", "profiles"))
+        self.assertEqual(
+            profile_path_for_role("input", environment=environment), directory / "input.toml"
+        )
+        self.assertEqual(
+            profile_path_for_role("output", Path(r"D:\elsewhere")),
+            Path(r"D:\elsewhere") / "output.toml",
+        )
+        with self.assertRaises(DeploymentError):
+            profile_path_for_role("both", environment=environment)
+        with self.assertRaises(ProfileError):
+            default_profile_directory({})
+
+    def test_setup_generates_both_profiles_then_stores_both_passwords(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PLAXIS"
+            (root / "python").mkdir(parents=True)
+            (root / "python" / "python.exe").touch()
+            profiles = Path(temporary) / "profiles"
+            store = MemoryStore()
+            installation = discover_plaxis_installations(
+                registry_roots=[(root, "HKLM\\Test", "PLAXIS test")],
+                python_version_probe=lambda _: (3, 12, 3),
+            )
+
+            with patch("plaxis_mcp.deployment.discover_plaxis_installations", return_value=installation):
+                with patch(
+                    "plaxis_mcp.deployment.getpass",
+                    side_effect=["in-secret", "in-secret", "out-secret", "out-secret"],
+                ):
+                    self.assertEqual(
+                        setup_main(["--profile-dir", str(profiles)], store=store), 0
+                    )
+
+            self.assertTrue((profiles / "input.toml").is_file())
+            self.assertTrue((profiles / "output.toml").is_file())
+            self.assertEqual(store.read(credential_target_for(root, "input")), "in-secret")
+            self.assertEqual(store.read(credential_target_for(root, "output")), "out-secret")
+
+    def test_setup_can_generate_profiles_without_prompting_for_passwords(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PLAXIS"
+            (root / "python").mkdir(parents=True)
+            (root / "python" / "python.exe").touch()
+            profiles = Path(temporary) / "profiles"
+            installation = discover_plaxis_installations(
+                registry_roots=[(root, "HKLM\\Test", "PLAXIS test")],
+                python_version_probe=lambda _: (3, 12, 3),
+            )
+
+            with patch("plaxis_mcp.deployment.discover_plaxis_installations", return_value=installation):
+                with patch("plaxis_mcp.deployment.getpass") as prompt:
+                    self.assertEqual(
+                        setup_main(["--profile-dir", str(profiles), "--skip-credentials"]), 0
+                    )
+            prompt.assert_not_called()
+            self.assertTrue((profiles / "input.toml").is_file())
 
     def test_packaging_foundations_are_present(self):
         root = Path(__file__).resolve().parents[1]

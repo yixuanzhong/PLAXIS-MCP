@@ -26,6 +26,14 @@ WORKER_PROTOCOL_VERSION = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 _SECRET_FIELD_MARKERS = ("password", "secret", "token", "credential_blob")
 
+# One per-user location holds the generated profiles for every client on the
+# machine, so Caros, Claude Code, Codex, Cursor and VS Code all launch from the
+# same installation binding and the same Credential Manager entries. The name
+# is historical -- it is where the first supported installer wrote -- and is
+# kept because ``credential_target`` is derived from it.
+INSTALL_DIRECTORY_PARTS = ("Caros", "PLAXIS-MCP")
+PROFILE_DIRECTORY_NAME = "profiles"
+
 
 class DeploymentError(RuntimeError):
     """A safe deployment or configuration failure."""
@@ -436,6 +444,36 @@ def write_role_profiles(
     }
 
 
+def default_profile_directory(environment: Mapping[str, str] | None = None) -> Path:
+    """Return the shared per-user profiles directory every client launches from."""
+
+    values = os.environ if environment is None else environment
+    local_app_data = values.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise ProfileError(
+            "LOCALAPPDATA is not set, so the default PLAXIS-MCP profiles directory "
+            "cannot be located. Pass an explicit profiles directory instead."
+        )
+    return Path(local_app_data).joinpath(*INSTALL_DIRECTORY_PARTS) / PROFILE_DIRECTORY_NAME
+
+
+def profile_path_for_role(
+    role: object,
+    directory: Path | str | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve one role's generated profile inside a profiles directory."""
+
+    normalised = _normalise_role(role)
+    base = (
+        Path(directory).expanduser()
+        if directory is not None
+        else default_profile_directory(environment)
+    )
+    return base / ("%s.toml" % normalised)
+
+
 _REGISTRY_VENDOR_ROOTS = (
     r"SOFTWARE\Bentley\PLAXIS",
     r"SOFTWARE\Bentley\Geotechnical",
@@ -743,26 +781,30 @@ def credentials_main(argv: Sequence[str] | None = None, *, store: CredentialStor
     target = _target_from_args(parser, namespace)
     credential_store = store or WindowsCredentialStore()
     if namespace.action == "set":
-        label = "Input" if target.endswith("/input") else "Output"
-        password = getpass("PLAXIS %s password: " % label)
-        confirmation = getpass("Confirm password: ")
-        if not password:
-            parser.error("Password must not be empty.")
-        if password != confirmation:
-            parser.error("Passwords did not match.")
-        credential_store.write(target, password)
-        print("PLAXIS-MCP password stored in Windows Credential Manager.")
+        _store_role_password(parser, target, credential_store)
         return 0
     credential_store.delete(target)
     print("PLAXIS-MCP password removed from Windows Credential Manager.")
     return 0
 
 
-def profiles_main(argv: Sequence[str] | None = None) -> int:
-    """Discover one certified installation and generate its two TOML profiles."""
+def _store_role_password(
+    parser: argparse.ArgumentParser, target: str, store: CredentialStore
+) -> None:
+    """Prompt twice with hidden input and store one role password."""
 
-    parser = argparse.ArgumentParser(prog="plaxis-mcp-profiles")
-    parser.add_argument("--output-dir", required=True, type=Path, help="Target profiles directory")
+    label = "Input" if target.endswith("/input") else "Output"
+    password = getpass("PLAXIS %s password: " % label)
+    confirmation = getpass("Confirm password: ")
+    if not password:
+        parser.error("Password must not be empty.")
+    if password != confirmation:
+        parser.error("Passwords did not match.")
+    store.write(target, password)
+    print("PLAXIS-MCP password stored in Windows Credential Manager.")
+
+
+def _add_profile_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--installation-root", type=Path, help="Required when discovery finds multiple installs")
     parser.add_argument("--input-host", default="127.0.0.1")
     parser.add_argument("--input-port", type=int, default=10000)
@@ -773,7 +815,11 @@ def profiles_main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Record the required organizational security acceptance for PLAXIS V21/Python 3.7.4.",
     )
-    namespace = parser.parse_args(argv)
+
+
+def _generate_role_profiles(
+    parser: argparse.ArgumentParser, namespace: argparse.Namespace, directory: Path
+) -> dict[str, Path]:
     installation = select_installation(
         discover_plaxis_installations(), selected_root=namespace.installation_root
     )
@@ -782,8 +828,8 @@ def profiles_main(argv: Sequence[str] | None = None) -> int:
             "legacy-37 is unsupported without explicit organizational security acceptance; "
             "rerun with --accept-legacy-37 only after that approval."
         )
-    paths = write_role_profiles(
-        namespace.output_dir,
+    return write_role_profiles(
+        directory,
         installation,
         input_host=namespace.input_host,
         input_port=namespace.input_port,
@@ -791,7 +837,57 @@ def profiles_main(argv: Sequence[str] | None = None) -> int:
         output_port=namespace.output_port,
         legacy_security_accepted=namespace.accept_legacy_37,
     )
+
+
+def profiles_main(argv: Sequence[str] | None = None) -> int:
+    """Discover one certified installation and generate its two TOML profiles."""
+
+    parser = argparse.ArgumentParser(prog="plaxis-mcp-profiles")
+    parser.add_argument("--output-dir", required=True, type=Path, help="Target profiles directory")
+    _add_profile_generation_arguments(parser)
+    namespace = parser.parse_args(argv)
+    paths = _generate_role_profiles(parser, namespace, namespace.output_dir)
     print(json.dumps({role: str(path) for role, path in paths.items()}, sort_keys=True))
+    return 0
+
+
+def setup_main(argv: Sequence[str] | None = None, *, store: CredentialStore | None = None) -> int:
+    """Provision this machine once: generate both profiles, then store both passwords.
+
+    This is the whole per-machine setup a client needs. Every client then
+    launches ``serve --role input`` / ``serve --role output`` against the same
+    profiles directory, so the installation binding and the stored passwords
+    are shared rather than duplicated per client.
+    """
+
+    parser = argparse.ArgumentParser(prog="plaxis-mcp setup")
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=None,
+        help="Profiles directory (default: %%LOCALAPPDATA%%\\Caros\\PLAXIS-MCP\\profiles)",
+    )
+    _add_profile_generation_arguments(parser)
+    parser.add_argument(
+        "--skip-credentials",
+        action="store_true",
+        help="Generate the profiles only; store the passwords later with `credentials set`.",
+    )
+    namespace = parser.parse_args(argv)
+    directory = namespace.profile_dir or default_profile_directory()
+    paths = _generate_role_profiles(parser, namespace, directory)
+    for role in ("input", "output"):
+        print("Generated %s profile: %s" % (role, paths[role]))
+    if namespace.skip_credentials:
+        print("Store both passwords with `plaxis-mcp credentials set --profile <profile.toml>`.")
+        return 0
+
+    credential_store = store or WindowsCredentialStore()
+    for role in ("input", "output"):
+        _store_role_password(
+            parser, load_profile(paths[role]).credential_target, credential_store
+        )
+    print("PLAXIS-MCP is ready. Launch a role with `plaxis-mcp serve --role input`.")
     return 0
 
 

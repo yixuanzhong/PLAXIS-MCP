@@ -41,7 +41,9 @@ from .deployment import (
     WindowsCredentialStore,
     credentials_main,
     load_profile,
+    profile_path_for_role,
     profiles_main,
+    setup_main,
 )
 
 
@@ -286,7 +288,7 @@ _PROFILE_OVERRIDE_ENVIRONMENT = (
 def _reject_profile_environment_overrides(environment: Mapping[str, str]) -> None:
     if any(name in environment for name in _PROFILE_OVERRIDE_ENVIRONMENT):
         raise ServerConfigurationError(
-            "serve --config uses only its generated profile and Windows Credential Manager; "
+            "serve uses only its generated profile and Windows Credential Manager; "
             "PLAXIS endpoint environment overrides are not allowed."
         )
 
@@ -929,10 +931,16 @@ def _run_stdio(config: ServerConfig) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run stdio MCP, package profiles, or the hidden-input credential utility."""
 
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # Reporting the version starts no server, so it stays available even where
+    # the transport is misconfigured; the packaging preflight relies on it.
+    if arguments and arguments[0] in ("--version", "-V"):
+        print("plaxis-mcp %s" % __version__)
+        return 0
+
     transport = os.getenv("PLAXIS_MCP_TRANSPORT", "stdio")
     if transport != "stdio":
         raise ServerConfigurationError("PLAXIS-MCP supports the stdio transport only.")
-    arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
         config = load_server_config()
         if not config.worker_python:
@@ -949,19 +957,45 @@ def main(argv: list[str] | None = None) -> int:
         return credentials_main(arguments[1:])
     if arguments[0] == "profiles":
         return profiles_main(arguments[1:])
+    if arguments[0] == "setup":
+        return setup_main(arguments[1:])
 
     parser = argparse.ArgumentParser(prog="plaxis-mcp")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="Start a role-pinned stdio MCP server.")
-    serve.add_argument("--config", required=True, type=Path, help="Generated input.toml or output.toml")
-    # Registered for --help discoverability only; both are dispatched above.
+    profile_source = serve.add_mutually_exclusive_group(required=True)
+    profile_source.add_argument("--config", type=Path, help="Generated input.toml or output.toml")
+    profile_source.add_argument(
+        "--role",
+        choices=("input", "output"),
+        help="Use this role's generated profile from the profiles directory",
+    )
+    serve.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=None,
+        help="Profiles directory for --role (default: %%LOCALAPPDATA%%\\Caros\\PLAXIS-MCP\\profiles)",
+    )
+    # Registered for --help discoverability only; all three are dispatched above.
     commands.add_parser("credentials", help="Store or remove a PLAXIS role password.")
     commands.add_parser("profiles", help="Discover PLAXIS and generate role profiles.")
+    commands.add_parser("setup", help="Generate both profiles and store both passwords.")
     namespace = parser.parse_args(arguments)
+    if namespace.config is not None and namespace.profile_dir is not None:
+        parser.error("--profile-dir applies to --role; --config already names a profile file.")
 
     _reject_profile_environment_overrides(os.environ)
-    profile = load_profile(namespace.config)
-    return _run_stdio(server_config_from_profile(profile))
+    profile_path = (
+        namespace.config
+        if namespace.config is not None
+        else profile_path_for_role(namespace.role, namespace.profile_dir)
+    )
+    if not Path(profile_path).is_file():
+        raise ServerConfigurationError(
+            "No PLAXIS-MCP profile at %s. Run `plaxis-mcp setup` once on this machine."
+            % profile_path
+        )
+    return _run_stdio(server_config_from_profile(load_profile(profile_path)))
 
 
 if __name__ == "__main__":
