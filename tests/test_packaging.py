@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 
@@ -53,6 +54,30 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("PLAXIS_BUNDLE_PYTHON", smoke_test)
         self.assertNotIn("PLAXIS_SCRIPTING_PATH", smoke_test)
         self.assertNotIn("load_new_server", smoke_test)
+
+    def test_command_reference_catalog_is_well_formed_and_never_packaged(self):
+        """The WP-B catalog is a development/test reference only.
+
+        It must never be added to plaxis-mcp.spec's datas or otherwise ship
+        in the signed artifact -- it is not a runtime dependency, and
+        bundling it would risk tripping the vendor-redistribution intent even
+        though its own content is written in our words, not copied from the
+        Bentley-copyrighted source docs.
+        """
+
+        catalog_path = ROOT / "docs" / "plaxis-command-reference.v22.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(catalog["plaxis_generation"], "PLAXIS 2D CONNECT Edition V22")
+        self.assertEqual(catalog["runtime_profile"], "legacy-38")
+        self.assertGreater(len(catalog["commands"]), 0)
+        required_keys = {"command", "wired_by_tool", "doc_page", "our_summary", "argument_shape"}
+        for entry in catalog["commands"]:
+            missing = required_keys - set(entry)
+            self.assertFalse(missing, "catalog entry %r is missing %r" % (entry.get("command"), missing))
+
+        spec = (ROOT / "packaging" / "plaxis-mcp.spec").read_text(encoding="utf-8")
+        self.assertNotIn("docs", spec)
 
 
 if __name__ == "__main__":
