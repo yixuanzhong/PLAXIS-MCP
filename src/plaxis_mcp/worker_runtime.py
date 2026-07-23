@@ -1,7 +1,8 @@
 """Python 3.7-compatible runtime used inside a PLAXIS Python bundle.
 
 Do not add modern Python syntax here: this module is deliberately exercised
-under PLAXIS V21's Python 3.7.4 as well as newer PLAXIS bundle interpreters.
+under the Python 3.7.4 that PLAXIS V20 and V21 bundle, as well as newer PLAXIS
+bundle interpreters.
 """
 
 from __future__ import print_function

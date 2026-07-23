@@ -33,7 +33,7 @@ the selected certified interpreter and a Credential Manager target.
 `scripts/install_windows.ps1` calls the packaged `profiles` command. It
 selects the sole registry-discovered certified installation automatically; if
 more than one is found, the installer stops until `-InstallationRoot` names
-one of those roots. V21/Python 3.7.4 additionally requires the installer
+one of those roots. V20/V21 Python 3.7.4 additionally requires the installer
 switch `-AcceptLegacy37`, which records the explicit organizational security
 acceptance in both generated profiles.
 

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.yixuanzhong/plaxis-mcp",
+  "title": "PLAXIS",
+  "description": "Windows-local MCP server for PLAXIS 2D Remote Scripting: geometry, staged construction, results.",
+  "version": "0.3.0",
+  "websiteUrl": "https://github.com/yixuanzhong/PLAXIS-MCP#readme",
+  "repository": {
+    "url": "https://github.com/yixuanzhong/PLAXIS-MCP",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "plaxis-mcp",
+      "version": "0.3.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "valueHint": "command"
+        },
+        {
+          "type": "named",
+          "name": "--role",
+          "description": "Which PLAXIS endpoint this process serves. A process has one immutable role, so register Input and Output as two separate servers when both are needed. Run `plaxis-mcp setup` once per machine first: it generates the role profiles and stores the PLAXIS passwords in Windows Credential Manager.",
+          "choices": ["input", "output"],
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

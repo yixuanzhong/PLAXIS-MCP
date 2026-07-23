@@ -26,11 +26,13 @@ while PLAXIS ships version-specific scripting environments.
 | --- | --- | --- | --- |
 | PLAXIS 2024.2 and newer | 3.12.3 | `current-312` | Enable after live certification |
 | PLAXIS CONNECT Edition V22 through early 2024 | 3.8.10 | `legacy-38` | Initial production target |
-| PLAXIS CONNECT Edition V21 | 3.7.4 | `legacy-37` | Enable after live and security certification |
+| PLAXIS CONNECT Edition V20 and V21 | 3.7.4 | `legacy-37` | Enable after live and security certification |
 
-An unknown or uncertified PLAXIS/Python pairing fails closed. V21 is a legacy
-profile: its end-of-life Python is isolated inside the loopback worker and
-requires organizational security acceptance.
+An unknown or uncertified PLAXIS/Python pairing fails closed, and the Python
+match is exact: a 3.7 series interpreter at any other patch level is a
+different, uncertified ABI, so it is rejected rather than assumed compatible.
+V20 and V21 share the legacy profile: their end-of-life Python is isolated
+inside the loopback worker and requires organizational security acceptance.
 
 ## Requirements
 

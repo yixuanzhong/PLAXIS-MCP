@@ -1,0 +1,118 @@
+name: Release
+
+# Publishing runs entirely on OIDC: PyPI trusted publishing and the MCP
+# registry both accept this workflow's short-lived identity token, so no
+# long-lived API token is stored anywhere. The file name must stay
+# `workflow.yml` -- it is what the PyPI trusted publisher is bound to.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The host targets Windows: registry discovery, Credential Manager and the
+    # default profile location are all Windows paths.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "mcp[cli]==1.26.0"
+      - name: Run the unit suite
+        # There is no tests/__init__.py, so discovery has to start inside tests/.
+        working-directory: tests
+        env:
+          PYTHONPATH: ../src
+        run: python -m unittest discover -s . -t .
+
+  versions-agree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Check the tag, package and server.json versions agree
+        shell: python
+        run: |
+          import json, os, pathlib, re, sys, tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          init = re.search(
+              r'__version__ = "([^"]+)"',
+              pathlib.Path("src/plaxis_mcp/__init__.py").read_text(),
+          ).group(1)
+          server = json.loads(pathlib.Path("server.json").read_text())
+          found = {
+              "pyproject": pyproject,
+              "__init__": init,
+              "server.json": server["version"],
+              "server.json package": server["packages"][0]["version"],
+          }
+          ref = os.environ.get("GITHUB_REF", "")
+          if ref.startswith("refs/tags/v"):
+              found["tag"] = ref.removeprefix("refs/tags/v")
+
+          if len(set(found.values())) != 1:
+              sys.exit("versions disagree: %s" % found)
+          print("all sources agree on %s" % pyproject)
+
+  publish-pypi:
+    needs: [test, versions-agree]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Confirm the registry ownership marker survived into the sdist
+        # The registry proves ownership by finding this line in the README that
+        # PyPI serves, so a build that dropped it would publish fine and then
+        # fail the registry step with a confusing permissions error.
+        run: |
+          set -euo pipefail
+          tar -xzOf dist/*.tar.gz --wildcards '*/PKG-INFO' \
+            | grep -q 'mcp-name: io.github.yixuanzhong/plaxis-mcp'
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-registry:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Wait for the new version to be servable from PyPI
+        # The registry fetches the package metadata itself to check the
+        # ownership marker, so publishing before the index catches up fails.
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import json;print(json.load(open("server.json"))["version"])')
+          for _ in $(seq 1 30); do
+            if curl -sf "https://pypi.org/pypi/plaxis-mcp/$version/json" > /dev/null; then
+              echo "plaxis-mcp $version is available"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "plaxis-mcp $version did not appear on PyPI" >&2
+          exit 1
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+      - run: ./mcp-publisher validate
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish

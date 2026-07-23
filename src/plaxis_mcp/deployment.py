@@ -70,7 +70,11 @@ LEGACY_38 = RuntimeProfile(
     "legacy-38", (3, 8, 10), "PLAXIS CONNECT Edition V22 through early 2024"
 )
 LEGACY_37 = RuntimeProfile(
-    "legacy-37", (3, 7, 4), "PLAXIS CONNECT Edition V21", security_acceptance_required=True
+    # V20 and V21 both bundle a Python 3.7 series interpreter and share this
+    # profile. The version match stays exact: another 3.7 patch level is a
+    # different, uncertified ABI and must fail closed rather than be assumed
+    # compatible.
+    "legacy-37", (3, 7, 4), "PLAXIS CONNECT Edition V20 and V21", security_acceptance_required=True
 )
 SUPPORTED_RUNTIME_PROFILES: tuple[RuntimeProfile, ...] = (CURRENT_312, LEGACY_38, LEGACY_37)
 
@@ -813,7 +817,7 @@ def _add_profile_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--accept-legacy-37",
         action="store_true",
-        help="Record the required organizational security acceptance for PLAXIS V21/Python 3.7.4.",
+        help="Record the required organizational security acceptance for PLAXIS V20/V21 Python 3.7.4.",
     )
 
 
