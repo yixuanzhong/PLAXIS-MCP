@@ -516,7 +516,10 @@ class WorkerRuntimeTests(unittest.TestCase):
         handshake = runtime.handle_request({"protocol": 1, "id": 1, "operation": "handshake", "params": {}})
         self.assertTrue(handshake["ok"])
         self.assertEqual(handshake["result"]["role"], "input")
-        self.assertEqual(len(handshake["result"]["operations"]), 29)
+        # 29 before the error-fidelity work; list_objects and model_state are
+        # the two operations it adds to the input role (WP-G, WP-H), and
+        # view_results is the one the live Output test showed was missing.
+        self.assertEqual(len(handshake["result"]["operations"]), 32)
 
         connected = runtime.handle_request(
             {
@@ -712,7 +715,11 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(not_connected["error"]["code"], "NOT_CONNECTED")
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 31)
+        # 31/11 before list_objects, model_state and view_results, all
+        # input-only: the first two answer questions about a model being
+        # built, and the third hands a calculated phase to Output, which is
+        # the only route from a calculated model to the Output endpoint.
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 34)
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 11)
 
         def factory(**kwargs):

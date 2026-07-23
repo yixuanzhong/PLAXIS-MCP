@@ -119,10 +119,10 @@ servers when it needs both.
 | Role | Endpoint | Tools |
 | --- | --- | --- |
 | **Both** | — | `connect` · `disconnect` · `connection_status` · `list_members` · `inspect` · `project_info` · `list_phases` · `list_materials` |
-| **Input** | `127.0.0.1:10000` | `set_property` · `call_method` · `new_project` · `open_project` · `close_project` · `recover_project` · `save_project` · `create_phase` · `set_current_phase` · `set_phase_property` · `activate` · `deactivate` · `calculate` · `set_mode` · `generate_mesh` · `create_point` · `create_line` · `create_polygon` · `create_borehole` · `create_soillayer` · `create_material` · `assign_material` · `create_structural_element` |
+| **Input** | `127.0.0.1:10000` | `list_objects` · `model_state` · `set_property` · `call_method` · `new_project` · `open_project` · `close_project` · `recover_project` · `save_project` · `create_phase` · `set_current_phase` · `set_phase_property` · `activate` · `deactivate` · `calculate` · `view_results` · `set_mode` · `generate_mesh` · `create_point` · `create_line` · `create_polygon` · `create_borehole` · `create_soillayer` · `create_material` · `assign_material` · `create_structural_element` |
 | **Output** | `127.0.0.1:10001` | `list_result_types` · `get_results` · `get_single_result` |
 
-**31 Input tools · 11 Output tools.**
+**34 Input tools · 11 Output tools.**
 
 - `connect()` takes no endpoint or credential arguments. It uses only the pinned role
   configuration, so an agent cannot redirect a stored password to an arbitrary host.
@@ -130,6 +130,19 @@ servers when it needs both.
 - `get_results(phase, result_type_path, fem_type="node", offset=0, limit=200)` paginates
   losslessly. `limit` is 1–5,000; responses report `count`, `offset`, `limit`,
   `returned_count`, `has_more`, `next_offset` and `results`.
+- Every object in a result carries `path` — the exact string to pass back to any reference
+  parameter. `list_objects(kind)` lists a whole kind that way, with a geometry summary
+  (coordinates, or a parsed `bounds` for objects that report a bounding box).
+- `model_state()` reports mesh status, the phase table and unassigned materials before a
+  calculate is attempted. It separates `blocking` (a fault in this model) from `unknown` (a
+  check that could not run here) and `caveats` (something PLAXIS does not expose at all — on
+  2D V22, whether the mesh still matches the geometry), so an empty `blocking` is never
+  mistaken for a clean bill of health.
+- Results live on the Output server, which reads whatever the PLAXIS Output application has
+  open. `view_results(phase)` on the Input server is what puts a calculated phase there.
+- When PLAXIS rejects a call, its own message travels beside ours in `plaxis_message`
+  (sanitised: no filesystem paths, no frames, capped with the truncation flagged out of band).
+  A failing `calculate` also carries a per-phase table in `details`.
 
 ---
 

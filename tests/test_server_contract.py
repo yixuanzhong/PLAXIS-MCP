@@ -119,6 +119,9 @@ class ServerContractTests(unittest.TestCase):
                 "create_material",
                 "assign_material",
                 "create_structural_element",
+                "list_objects",
+                "model_state",
+                "view_results",
             },
         )
         self.assertEqual(
@@ -158,7 +161,10 @@ class ServerContractTests(unittest.TestCase):
                 "host": "127.0.0.1",
                 "port": 10000,
                 "password": "not-for-client",
-                "timeout": 5.0,
+                # Was 5.0. PLAXIS stays busy for several seconds after
+                # new_project, and connects landing in that window failed
+                # outright (WP-I).
+                "timeout": 15.0,
                 "request_timeout": 240.0,
             },
         )
@@ -243,7 +249,7 @@ class ServerContractTests(unittest.TestCase):
         loop. A late-binding closure bug there (capturing the loop variable
         itself rather than its value at each iteration) would make every
         wrapped tool call whichever tool was defined last -- worth a direct
-        check now that the Input role alone wraps 31 tools, not a handful."""
+        check now that the Input role alone wraps 34 tools, not a handful."""
 
         class SelectiveFailureSession:
             def status(self):

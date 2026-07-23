@@ -20,6 +20,11 @@ import threading
 from typing import Any, Mapping
 
 from .deployment import RuntimeProfileError, linked_worker_pythons, validate_worker_attestation
+# The worker owns the connect-retry policy; the host imports it only to size
+# its own deadline, so a host timeout cannot cut a retry sequence in half.
+# worker_runtime imports nothing but the standard library -- importing it here
+# does not pull any PLAXIS SDK into the host interpreter.
+from .worker_runtime import connect_deadline
 
 
 PROTOCOL_VERSION = 1
@@ -50,10 +55,20 @@ class WorkerOperationError(BridgeError):
         message: str,
         retryable: bool = False,
         state: str | None = None,
+        plaxis_message: str | None = None,
+        plaxis_message_truncated: bool = False,
+        details: Any | None = None,
     ) -> None:
         self.code = code
         self.retryable = retryable
         self.state = state
+        # PLAXIS's own words about the failure, and any structured evidence the
+        # operation rebuilt (a failed calculate carries its per-phase table).
+        # Carried beside the message so the host can surface both without
+        # parsing one out of the other.
+        self.plaxis_message = plaxis_message
+        self.plaxis_message_truncated = plaxis_message_truncated
+        self.details = details
         super().__init__(message)
 
 
@@ -71,7 +86,7 @@ class BridgeSessionConfig:
     host: str = "127.0.0.1"
     port: int = 10000
     password: str = field(default="", repr=False)
-    connect_timeout: float = 5.0
+    connect_timeout: float = 15.0
     request_timeout: float = 240.0
     worker_script: str | None = None
     worker_args: tuple[str, ...] = ()
@@ -457,11 +472,19 @@ class WorkerBridge:
         state = error.get("state")
         if state is not None and not isinstance(state, str):
             self._fault(WorkerProtocolError("PLAXIS worker error response had an invalid state."))
+        plaxis_message = error.get("plaxis_message")
+        if plaxis_message is not None and not isinstance(plaxis_message, str):
+            self._fault(
+                WorkerProtocolError("PLAXIS worker error response had an invalid vendor message.")
+            )
         raise WorkerOperationError(
             code=code,
             message=self._redact(message),
             retryable=bool(error.get("retryable", False)),
             state=state,
+            plaxis_message=None if plaxis_message is None else self._redact(plaxis_message),
+            plaxis_message_truncated=bool(error.get("plaxis_message_truncated", False)),
+            details=error.get("details"),
         )
 
     def _fault(self, error: BridgeError, cause: BaseException | None = None) -> None:
@@ -571,7 +594,11 @@ class BridgeSession:
                 "timeout": self.config.connect_timeout,
                 "request_timeout": self.config.request_timeout,
             },
-            timeout=self.config.startup_timeout,
+            # The worker retries a PLAXIS that is present but still busy, so
+            # the host deadline has to cover the whole retry sequence. Cutting
+            # it short at startup_timeout would fault the worker mid-retry and
+            # turn a recoverable connect into an uncertain session.
+            timeout=connect_deadline(self.config.connect_timeout, self.config.startup_timeout),
         )
         connected = self._require_object_result(result, "connect")
         # Only a connect that actually succeeded may clear the uncertainty, and

@@ -11,7 +11,9 @@ import datetime
 import json
 import math
 import os
+import re
 import sys
+import time
 
 
 PROTOCOL_VERSION = 1
@@ -19,8 +21,10 @@ COMMON_OPERATIONS = (
     "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials",
 )
 INPUT_OPERATIONS = COMMON_OPERATIONS + (
+    "list_objects", "model_state",
     "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project",
-    "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property",
+    "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "view_results",
+    "set_phase_property",
     "set_mode", "generate_mesh",
     "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer",
     "create_material", "assign_material", "create_structural_element",
@@ -34,15 +38,183 @@ ROLE_TOOL_ALLOWLISTS = {
 TRANSPORT_OPERATIONS = ("handshake", "status", "connect", "disconnect", "call", "shutdown")
 _SECRET_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "CREDENTIAL", "API_KEY")
 
+# WP-I. PLAXIS is routinely busy for a few seconds after new_project, and a
+# connect that lands in that window used to fail once, non-retryably -- which
+# an agent read as permanent and answered around, from its own knowledge,
+# about a model it had never opened. Retrying a slow server here is cheaper
+# than any client-side recovery, and the policy lives with the worker that
+# applies it; the host imports these to size its own request deadline so it
+# cannot time out mid-retry.
+CONNECT_ATTEMPTS = 3
+CONNECT_BACKOFF_SECONDS = (0.5, 1.5)
+# Signatures of a server that exists but is not answering yet. Matched on text
+# as well as exception class name because plxscripting wraps its HTTP client's
+# errors and the class reaching us differs across releases.
+_RETRYABLE_CONNECTION_MARKERS = (
+    "timed out", "timeout", "max retries exceeded", "connection aborted",
+    "connection reset", "remote end closed",
+)
+# Nothing is listening on the port. Retrying that is pure latency, so it fails
+# on the first attempt and says so.
+_DEAD_PORT_MARKERS = ("refused", "target machine actively refused", "unreachable")
+
+
+def connect_deadline(connect_timeout, startup_timeout=0.0):
+    """The host-side ceiling for one connect, including the worker's retries."""
+
+    return float(startup_timeout) + float(connect_timeout) * CONNECT_ATTEMPTS + sum(
+        CONNECT_BACKOFF_SECONDS
+    )
+
+
+def classify_connection_error(exc):
+    """Return "retryable", "dead_port", or "unknown" for a connect failure."""
+
+    text = ("%s %s" % (type(exc).__name__, exc)).lower()
+    if any(marker in text for marker in _DEAD_PORT_MARKERS):
+        return "dead_port"
+    if any(marker in text for marker in _RETRYABLE_CONNECTION_MARKERS):
+        return "retryable"
+    return "unknown"
+
 
 class WorkerError(Exception):
     """Safe operational failure sent to the host as a JSON error."""
 
-    def __init__(self, code, message, retryable=False):
+    def __init__(
+        self,
+        code,
+        message,
+        retryable=False,
+        plaxis_message=None,
+        plaxis_message_truncated=False,
+        details=None,
+    ):
         super(WorkerError, self).__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        # PLAXIS's own validation text, sanitised (WP-A). It is a separate
+        # field rather than an addition to message so that no client matching
+        # on the existing wording breaks, and so a host can render or log the
+        # two independently.
+        self.plaxis_message = plaxis_message
+        self.plaxis_message_truncated = plaxis_message_truncated
+        # Structured, operation-specific evidence (e.g. the per-phase table a
+        # failed calculate rebuilds). Always JSON-safe, never proxies.
+        self.details = details
+
+
+_VENDOR_MESSAGE_LIMIT = 300
+# A Windows drive path, a UNC share, or a file:// URL. PLAXIS's validation
+# messages never need one, while an open/save failure or an import error can
+# carry the operator's directory layout -- which is not the caller's business.
+#
+# Windows directory names contain spaces constantly ("My Projects", "Program
+# Files"), so a pattern that stops at the first space is not a redaction: it
+# leaves the tail of the path in the message. Interior segments therefore
+# allow spaces and are anchored by the separator that follows them, and a
+# quoted path is taken whole. Two guards stop that from eating the sentence
+# around it: a segment may not contain ":", which is what let one match run on
+# through the prose into a second path later in the line, and the last
+# unquoted segment stops at whitespace.
+#
+# The one thing that survives is a trailing word of an unquoted path that ends
+# in a directory name with a space and no closing separator ("...\My Docs"
+# leaves "Docs"). Prose and directory names are not distinguishable there, and
+# a bare word carries no drive, no separators and no ancestor chain -- the
+# layout, which is what must not leak, is gone either way.
+_PATH_PATTERN = re.compile(
+    r"""
+    file://\S+
+    | (?P<quote>["'])                     # a quoted path is taken whole
+      (?:\\\\|[A-Za-z]:[\\/])
+      [^"'\r\n]*
+      (?P=quote)
+    | (?:\\\\|[A-Za-z]:[\\/])             # UNC share or drive letter
+      (?:[^\\/\r\n"':]*[\\/])*            # interior segments, spaces allowed
+      [^\s\\/\r\n"':]*                    # last segment, up to whitespace
+    """,
+    re.VERBOSE,
+)
+_PATH_PLACEHOLDER = "[path]"
+_TRACEBACK_PREFIXES = ('File "', "Traceback (most recent call last)")
+
+
+def sanitise_vendor_message(exc):
+    """Reduce a vendor exception to the one line a caller can act on.
+
+    Returns ``(text, truncated)``, or ``None`` when nothing survives. The
+    truncation flag rides alongside the text instead of being folded into it:
+    an ellipsis inside the string is exactly the silent truncation this repo
+    forbids, so the caller puts the flag in its own envelope field.
+
+    Suppressing vendor exceptions wholesale was right for tracebacks and wrong
+    for PLAXIS's own validation messages, which are API contract -- they name
+    the rejected property, the unknown parameter, the read-only member. What
+    is dropped here is everything else: frames, filesystem paths, and the
+    plxscripting header line that precedes the real complaint.
+    """
+
+    if exc is None:
+        return None
+    try:
+        text = exc if isinstance(exc, str) else str(exc)
+    except Exception:
+        return None
+    if not isinstance(text, str) or not text:
+        return None
+
+    lines = []
+    skip_next = False
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(_TRACEBACK_PREFIXES):
+            # A traceback frame is two lines: the File "..." location and the
+            # source line echoed under it. Dropping only the first leaves the
+            # source line looking like a message, and it is the one that gets
+            # picked as the complaint.
+            skip_next = line.startswith('File "')
+            continue
+        if skip_next:
+            skip_next = False
+            continue
+        lines.append(line)
+    if not lines:
+        return None
+
+    # plxscripting raises its errors as a header line plus PLAXIS's actual
+    # complaint on the next one (server.py: "Unsuccessful command:\n" +
+    # extra info), so a strict first-line rule would deliver only the header.
+    # Skip lines that are nothing but a header -- text ending in a colon --
+    # while a later line is still available to carry the content.
+    index = 0
+    while index + 1 < len(lines) and lines[index].endswith(":"):
+        index += 1
+
+    message = _PATH_PATTERN.sub(_PATH_PLACEHOLDER, lines[index]).strip()
+    if not any(character.isalnum() for character in message.replace(_PATH_PLACEHOLDER, "")):
+        return None
+    if len(message) > _VENDOR_MESSAGE_LIMIT:
+        return (message[:_VENDOR_MESSAGE_LIMIT], True)
+    return (message, False)
+
+
+def vendor_error(code, message, exc=None, retryable=False, details=None):
+    """Build a WorkerError that carries PLAXIS's own message when one exists."""
+
+    sanitised = sanitise_vendor_message(exc)
+    plaxis_message, truncated = sanitised if sanitised else (None, False)
+    return WorkerError(
+        code,
+        message,
+        retryable=retryable,
+        plaxis_message=plaxis_message,
+        plaxis_message_truncated=truncated,
+        details=details,
+    )
 
 
 def parse_path(path):
@@ -101,8 +273,8 @@ def resolve_path(root, path):
     for token in parse_path(path):
         try:
             value = value[token] if isinstance(token, int) else getattr(value, token)
-        except Exception:
-            raise WorkerError("INVALID_PATH", "PLAXIS object path could not be resolved.")
+        except Exception as exc:
+            raise vendor_error("INVALID_PATH", "PLAXIS object path could not be resolved.", exc)
     return value
 
 
@@ -157,27 +329,82 @@ def call_plaxis_command(target, command_name, *args):
 
     try:
         command = getattr(target, command_name)
-    except Exception:
-        raise WorkerError("PLAXIS_ERROR", "PLAXIS does not expose the '%s' command." % command_name)
+    except Exception as exc:
+        raise vendor_error(
+            "PLAXIS_ERROR", "PLAXIS does not expose the '%s' command." % command_name, exc
+        )
     if not callable(command):
         raise WorkerError("PLAXIS_ERROR", "PLAXIS '%s' is not a callable command." % command_name)
     try:
         return command(*args)
-    except Exception:
-        raise WorkerError("PLAXIS_ERROR", "PLAXIS could not execute '%s'." % command_name)
+    except Exception as exc:
+        raise vendor_error(
+            "PLAXIS_ERROR", "PLAXIS could not execute '%s'." % command_name, exc
+        )
 
 
-def read_member_value(obj, name):
+_PATH_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def is_path_name(name):
+    """Whether a PLAXIS object name is shaped like a resolvable path token."""
+
+    return isinstance(name, str) and bool(_PATH_NAME_PATTERN.match(name))
+
+
+def render_path(tokens):
+    """Rebuild a path string from parsed tokens (Plates[0].Name)."""
+
+    rendered = ""
+    for token in tokens:
+        if isinstance(token, int):
+            rendered += "[%d]" % token
+        elif rendered:
+            rendered += "." + token
+        else:
+            rendered = token
+    return rendered
+
+
+def object_path(value):
+    """The exact string a reference parameter accepts for this object (WP-B).
+
+    Every reference parameter here takes a path string that resolve_path can
+    walk, while described objects used to carry no such string -- so an agent
+    fed a tool's own output straight back and PLAXIS answered with a parse
+    error. PLAXIS's own get_cmd_line_repr is not that string: it returns the
+    object's GUID, which only the PLAXIS server can resolve back to a name.
+    The Name property is what resolve_path looks up on the global object, so
+    that is what is published, and only when it is shaped like a name.
+    """
+
+    name = read_member_value(value, "Name")
+    return name if is_path_name(name) else None
+
+
+def read_member(obj, name):
+    """Read one member as ``(present, value)``.
+
+    The presence flag exists so a member this PLAXIS generation does not
+    expose stays distinguishable from one whose value really is None -- a
+    readback that silently reports both as null is a wrong answer, not a
+    missing one.
+    """
+
     try:
         value = getattr(obj, name)
     except Exception:
-        return None
+        return (False, None)
     if hasattr(value, "value"):
         try:
-            return value.value
+            return (True, value.value)
         except Exception:
-            return None
-    return value
+            return (True, None)
+    return (True, value)
+
+
+def read_member_value(obj, name):
+    return read_member(obj, name)[1]
 
 
 def safe_dir(obj):
@@ -227,6 +454,11 @@ def describe_value(value, depth=0, max_depth=4, max_items=100):
             member = read_member_value(value, source)
             if member is None or isinstance(member, (str, bool, int, float)):
                 result[target] = member
+        # WP-B: the one field a caller can feed back into any reference
+        # parameter. Derived from the Name already read above rather than
+        # re-reading it, since every read is a PLAXIS round trip.
+        if is_path_name(result.get("name")):
+            result["path"] = result["name"]
         members = safe_dir(value)
         if members:
             # Never drop members silently: the caller must be able to tell a
@@ -244,8 +476,8 @@ def resolve_phase(global_object, identifier):
         raise WorkerError("INVALID_ARGUMENT", "A PLAXIS phase identifier is required.")
     try:
         phases = global_object.Phases
-    except Exception:
-        raise WorkerError("PLAXIS_ERROR", "The PLAXIS model does not expose phases.")
+    except Exception as exc:
+        raise vendor_error("PLAXIS_ERROR", "The PLAXIS model does not expose phases.", exc)
     if isinstance(identifier, int) and not isinstance(identifier, bool):
         try:
             return phases[identifier]
@@ -374,7 +606,15 @@ class WorkerRuntime(object):
                 raise WorkerError("UNKNOWN_OPERATION", "Worker operation is not supported.")
             return self._success_response(request_id, self._json_value(result))
         except WorkerError as exc:
-            return self._error_response(request_id, exc.code, exc.message, exc.retryable)
+            return self._error_response(
+                request_id,
+                exc.code,
+                exc.message,
+                exc.retryable,
+                plaxis_message=exc.plaxis_message,
+                plaxis_message_truncated=exc.plaxis_message_truncated,
+                details=exc.details,
+            )
         except Exception:
             # Deliberately do not expose vendor exceptions, tracebacks, proxy
             # reprs, or potentially embedded credentials to the host.
@@ -430,19 +670,12 @@ class WorkerRuntime(object):
         self._transition("connecting")
         try:
             factory = self._new_server_factory or self._load_new_server()
-            server, global_object = factory(
-                address=host,
-                port=port,
-                timeout=timeout,
-                request_timeout=request_timeout,
-                password=password,
-            )
         except WorkerError:
             self._transition("disconnected", "CONNECTION_FAILED")
             raise
-        except Exception:
-            self._transition("disconnected", "CONNECTION_FAILED")
-            raise WorkerError("CONNECTION_FAILED", "Unable to connect to the PLAXIS scripting server.")
+        server, global_object = self._connect_with_retries(
+            factory, host, port, password, timeout, request_timeout
+        )
 
         self._server = server
         self._global_object = global_object
@@ -469,6 +702,72 @@ class WorkerRuntime(object):
                 "The PLAXIS scripting server rejected the stored password for this endpoint.",
             )
         return result
+
+    def _connect_with_retries(self, factory, host, port, password, timeout, request_timeout):
+        """Connect, retrying a server that is present but not answering yet.
+
+        PLAXIS is busy for seconds after new_project, and the old single
+        attempt reported that as a permanent, non-retryable failure. An agent
+        that believes PLAXIS is permanently unreachable does not stop -- in the
+        smoke test it produced a plausible ground-profile table for a model it
+        had never opened. So a slow server is retried here, a dead port fails
+        on the first attempt, and either way the message says outright that
+        nothing was read.
+        """
+
+        attempt = 0
+        while True:
+            try:
+                return factory(
+                    address=host,
+                    port=port,
+                    timeout=timeout,
+                    request_timeout=request_timeout,
+                    password=password,
+                )
+            except WorkerError:
+                self._transition("disconnected", "CONNECTION_FAILED")
+                raise
+            except Exception as exc:
+                classification = classify_connection_error(exc)
+                attempt += 1
+                # Only a failure recognised as "the server is there but slow"
+                # is retried. Retrying anything else spends the caller's time
+                # and, worse, reports the outcome in the language of a
+                # timeout -- an unrecognised failure is neither a timeout nor
+                # proof that a retry would help, and must not claim to be.
+                if classification == "retryable" and attempt < CONNECT_ATTEMPTS:
+                    time.sleep(CONNECT_BACKOFF_SECONDS[attempt - 1])
+                    continue
+                self._transition("disconnected", "CONNECTION_FAILED")
+                raise vendor_error(
+                    "CONNECTION_FAILED",
+                    self._connection_failure_message(host, port, classification, attempt),
+                    exc,
+                    retryable=classification == "retryable",
+                )
+
+    @staticmethod
+    def _connection_failure_message(host, port, classification, attempts):
+        if classification == "dead_port":
+            return (
+                "Nothing is listening on the PLAXIS scripting port %s:%s. No model data was "
+                "read -- start PLAXIS, enable its scripting server on this port, and connect "
+                "again." % (host, port)
+            )
+        if classification == "retryable":
+            return (
+                "The PLAXIS scripting server at %s:%s did not answer within the connect timeout "
+                "(%d attempts). No model data was read; PLAXIS is often busy for a few seconds "
+                "after a new or opened project, so this connect can be retried."
+                % (host, port, attempts)
+            )
+        return (
+            "The connection to the PLAXIS scripting server at %s:%s failed for a reason this "
+            "build does not recognise; plaxis_message carries what the connection layer "
+            "reported. No model data was read, and it is not known whether retrying helps."
+            % (host, port)
+        )
 
     @staticmethod
     def _authentication_failed(global_object):
@@ -563,9 +862,9 @@ class WorkerRuntime(object):
         except WorkerError as exc:
             failure_code = exc.code
             raise
-        except Exception:
+        except Exception as exc:
             failure_code = "PLAXIS_ERROR"
-            raise WorkerError("PLAXIS_ERROR", "The requested PLAXIS operation failed.")
+            raise vendor_error("PLAXIS_ERROR", "The requested PLAXIS operation failed.", exc)
         finally:
             if self._server is not None:
                 self._transition("connected", failure_code)
@@ -579,6 +878,8 @@ class WorkerRuntime(object):
             "project_info": lambda server, global_object, params: self._project_info(global_object),
             "list_phases": lambda server, global_object, params: self._list_phases(global_object),
             "list_materials": lambda server, global_object, params: self._list_materials(global_object),
+            "list_objects": lambda server, global_object, params: self._list_objects(global_object, params),
+            "model_state": lambda server, global_object, params: self._model_state(global_object, params),
             "set_property": lambda server, global_object, params: self._set_property(global_object, params),
             "call_method": lambda server, global_object, params: self._call_method(global_object, params),
             "new_project": lambda server, global_object, params: self._new_project(server),
@@ -591,6 +892,7 @@ class WorkerRuntime(object):
             "activate": lambda server, global_object, params: self._set_active(global_object, params, True),
             "deactivate": lambda server, global_object, params: self._set_active(global_object, params, False),
             "calculate": lambda server, global_object, params: self._calculate(global_object, params),
+            "view_results": lambda server, global_object, params: self._view_results(global_object, params),
             "set_phase_property": lambda server, global_object, params: self._set_phase_property(global_object, params),
             "set_mode": lambda server, global_object, params: self._set_mode(global_object, params),
             "generate_mesh": lambda server, global_object, params: self._generate_mesh(global_object, params),
@@ -618,17 +920,114 @@ class WorkerRuntime(object):
         target = resolve_path(global_object, path)
         return {"path": path, "members": safe_dir(target), "summary": describe_value(target)}
 
+    # A property whose value is another PLAXIS object, not a literal. PLAXIS
+    # needs a real object reference for these, and plxscripting sends a plain
+    # string as a quoted text literal -- so a set_property write can never
+    # succeed here no matter how the value is spelled. Each entry names the
+    # tool that does work (WP-C).
+    _OBJECT_REFERENCE_PROPERTIES = {
+        "Material": (
+            "`%(path)s` is a material reference, not a writable property. "
+            "Use assign_material(paths=[\"%(owner)s\"], material=\"<material path>\") instead; "
+            "list_materials gives each material's `path`."
+        ),
+    }
+
+    @staticmethod
+    def _scalar_value(params, name):
+        """Reject the shapes PLAXIS cannot receive, and name what to send.
+
+        A dict or list here is not a PLAXIS value: plxscripting serialises a
+        command as a command line, where a mapping has no representation at
+        all and a sequence becomes a parenthesised group. Observed live, an
+        agent fed describe_value's own object dict back in and PLAXIS answered
+        with a parse error rather than anything nameable.
+        """
+
+        value = params.get(name)
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        raise WorkerError(
+            "INVALID_ARGUMENT",
+            "Worker parameter '%s' must be a scalar (string, number, boolean, or null). "
+            "Object and array values are not accepted here; pass the object's `path` string "
+            "(for example \"SoilMat_1\"), or use assign_material for a material reference." % name,
+        )
+
+    _TOPMOST_LAYER_NAME = re.compile(r"^Soillayer_0*1$")
+
+    @classmethod
+    def _is_below_the_topmost_layer(cls, tokens):
+        """Whether a path provably names a layer other than the topmost one.
+
+        Only the layers below the top derive their Top from the layer above,
+        so the guard must be able to prove which layer it is looking at.
+        "Provably" is the whole point: an unindexed or unfamiliar spelling
+        means unknown, and unknown must let the write through to PLAXIS rather
+        than block a mutation that may well be valid.
+        """
+
+        for position, token in enumerate(tokens):
+            if token == "Soillayers" and position + 1 < len(tokens):
+                following = tokens[position + 1]
+                if isinstance(following, int):
+                    return following > 0
+                return False
+            if isinstance(token, str) and token.startswith("Soillayer_"):
+                return not cls._TOPMOST_LAYER_NAME.match(token)
+        return False
+
+    @classmethod
+    def _derived_property_message(cls, tokens):
+        """Name the domain rule behind a property PLAXIS computes (WP-D).
+
+        plxscripting exposes no writability flag -- read-only is a fact the
+        PLAXIS server holds -- so this cannot be a general check. It is a
+        table of the rules that cost real time live: the smoke test spent ten
+        minutes and a killed run guessing at forms of a zone Top write that
+        PLAXIS was never going to accept.
+
+        The guard is deliberately narrow. It fires only where the path proves
+        the zone belongs to a layer below the top; the topmost layer's Top is
+        the one the plan records as writable, and refusing that would trade a
+        thrash for a blocked mutation. Everything it cannot prove goes to
+        PLAXIS, whose own answer is now legible (WP-A).
+        """
+
+        if (
+            tokens[-1] == "Top"
+            and any(token == "Zones" for token in tokens[:-1])
+            and cls._is_below_the_topmost_layer(tokens[:-1])
+        ):
+            return (
+                "`%s` is derived and read-only: below the topmost layer a zone's top boundary "
+                "follows the bottom of the zone above it. Set `Bottom` (or `Thickness`) on the "
+                "zone above instead. `top_manual` is writable but PLAXIS honours it only for "
+                "the topmost zone." % render_path(tokens)
+            )
+        return None
+
     def _set_property(self, global_object, params):
         path = self._required_string(params, "path")
+        value_to_set = self._scalar_value(params, "value")
         tokens = parse_path(path)
         if not tokens or isinstance(tokens[-1], int):
             raise WorkerError("INVALID_PATH", "Property paths must end with an attribute name.")
+        reference_message = self._OBJECT_REFERENCE_PROPERTIES.get(tokens[-1])
+        if reference_message is not None:
+            raise WorkerError(
+                "WRONG_TOOL",
+                reference_message % {"path": render_path(tokens), "owner": render_path(tokens[:-1])},
+            )
+        derived_message = self._derived_property_message(tokens)
+        if derived_message is not None:
+            raise WorkerError("READ_ONLY_PROPERTY", derived_message)
         target = global_object
         for token in tokens[:-1]:
             try:
                 target = target[token] if isinstance(token, int) else getattr(target, token)
-            except Exception:
-                raise WorkerError("INVALID_PATH", "PLAXIS property path could not be resolved.")
+            except Exception as exc:
+                raise vendor_error("INVALID_PATH", "PLAXIS property path could not be resolved.", exc)
         # A PLAXIS proxy accepts setattr for any name, including one that names
         # an object rather than a property: the assignment then lands on the
         # local proxy, shadows the real object, and reads back as the value the
@@ -636,8 +1035,8 @@ class WorkerRuntime(object):
         # never touched, so refuse anything that is not a writable property.
         try:
             previous = getattr(target, tokens[-1])
-        except Exception:
-            raise WorkerError("INVALID_PATH", "PLAXIS property path could not be resolved.")
+        except Exception as exc:
+            raise vendor_error("INVALID_PATH", "PLAXIS property path could not be resolved.", exc)
         # A property proxy exposes .value and is writable; an object proxy does
         # not. Both carry _guid, so the guid alone cannot tell them apart --
         # keying on it rejected legitimate sets such as Project.Title.
@@ -646,18 +1045,30 @@ class WorkerRuntime(object):
         if is_object and not is_property:
             raise WorkerError(
                 "INVALID_PATH",
-                "This path names a PLAXIS object, not a writable property. "
-                "Append the property to set, for example Project.Title.",
+                "`%s` names a PLAXIS object, not a writable property. Append the property to "
+                "set (for example Project.Title); list_members on this path shows which "
+                "properties it has." % path,
             )
         # Snapshot before mutating: a PLAXIS property proxy is a live reference,
         # so describing it after the set reports the new value as the old one.
         previous_value = describe_value(previous)
         try:
-            setattr(target, tokens[-1], params.get("value"))
+            setattr(target, tokens[-1], value_to_set)
             value = getattr(target, tokens[-1])
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS rejected the requested property update.")
-        return {"path": path, "previous": previous_value, "value": describe_value(value)}
+        except Exception as exc:
+            raise vendor_error(
+                "PLAXIS_ERROR", "PLAXIS rejected the requested property update.", exc
+            )
+        result = {"path": path, "previous": previous_value, "value": describe_value(value)}
+        if tokens[-1] == "Identification":
+            # Setting Identification renames the object: PLAXIS answers
+            # "SoilMat_1 renamed to SZ", and the path used here is dead from
+            # this call onwards. Returning the new one is the difference
+            # between one more call and a run of failing ones (WP-B).
+            renamed = object_path(target)
+            if renamed is not None:
+                result["object_path"] = renamed
+        return result
 
     def _call_method(self, global_object, params):
         path = self._optional_string(params, "path", "")
@@ -666,25 +1077,38 @@ class WorkerRuntime(object):
         args = params.get("args", [])
         if not isinstance(args, list):
             raise WorkerError("INVALID_ARGUMENT", "PLAXIS method arguments must be an array.")
+        # The tool contract has always said "literal arguments only"; the
+        # schema used to admit nested objects and arrays anyway, and every
+        # malformed command in the smoke-test console transcripts came through
+        # this hatch. Contract and schema now agree (WP-H).
+        for index, argument in enumerate(args):
+            if argument is not None and not isinstance(argument, (str, bool, int, float)):
+                raise WorkerError(
+                    "INVALID_ARGUMENT",
+                    "PLAXIS method argument %d must be a scalar (string, number, boolean, or "
+                    "null). This tool cannot pass an object or array to PLAXIS; use the "
+                    "first-class tool for that command, or pass an object's `path` string to "
+                    "a tool that takes references." % index,
+                )
         target = resolve_path(global_object, path)
         try:
             callable_member = getattr(target, method)
-        except Exception:
-            raise WorkerError("INVALID_PATH", "PLAXIS method path could not be resolved.")
+        except Exception as exc:
+            raise vendor_error("INVALID_PATH", "PLAXIS method path could not be resolved.", exc)
         if not callable(callable_member):
             raise WorkerError("INVALID_ARGUMENT", "The requested PLAXIS member is not callable.")
         try:
             result = callable_member(*args)
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "The requested PLAXIS method failed.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "The requested PLAXIS method failed.", exc)
         return {"path": path, "method": method, "args": args, "result": describe_value(result)}
 
     @staticmethod
     def _new_project(server):
         try:
             result = server.new()
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not create a new project.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS could not create a new project.", exc)
         return {"action": "new_project", "result": describe_value(result)}
 
     def _open_project(self, server, params):
@@ -696,24 +1120,24 @@ class WorkerRuntime(object):
             raise WorkerError("INVALID_PATH", "No PLAXIS project file exists at the requested path.")
         try:
             result = server.open(filename)
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not open the requested project.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS could not open the requested project.", exc)
         return {"action": "open_project", "filename": filename, "result": describe_value(result)}
 
     @staticmethod
     def _close_project(server):
         try:
             result = server.close()
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not close the active project.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS could not close the active project.", exc)
         return {"action": "close_project", "result": describe_value(result)}
 
     @staticmethod
     def _recover_project(server):
         try:
             result = server.recover()
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not recover the active project.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS could not recover the active project.", exc)
         return {"action": "recover_project", "result": describe_value(result)}
 
     def _save_project(self, global_object, params):
@@ -726,8 +1150,8 @@ class WorkerRuntime(object):
         try:
             method = getattr(global_object, "save")
             result = method() if filename is None else method(filename)
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not save the active project.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS could not save the active project.", exc)
         payload = {"action": "save_project", "result": describe_value(result)}
         if filename is not None:
             payload["filename"] = filename
@@ -759,6 +1183,21 @@ class WorkerRuntime(object):
         result = call_plaxis_command(global_object, "setcurrentphase", phase)
         return {"phase": describe_value(phase), "result": describe_value(result)}
 
+    def _view_results(self, global_object, params):
+        """Open a calculated phase in PLAXIS Output.
+
+        Without this there is no route at all from a calculated Input model to
+        the Output endpoint: Output reads only what its application already
+        has open, the Output role has no open_project by design, and PLAXIS's
+        own "view" takes a phase *object*, which call_method cannot pass since
+        it accepts scalars only. Found live -- every Output tool answered
+        "No active project" against a model that had just been calculated.
+        """
+
+        phase = resolve_reference(global_object, params.get("phase"), "phase")
+        result = call_plaxis_command(global_object, "view", phase)
+        return {"phase": describe_value(phase), "result": describe_value(result)}
+
     def _set_active(self, global_object, params, activate):
         # activate/deactivate's sequence-form signature: <{1,...}: Activatable>'
         # <{1,...}: Any>' -- a Python list argument is itself serialised as a
@@ -775,6 +1214,69 @@ class WorkerRuntime(object):
             "result": describe_value(result),
         }
 
+    # What a calculate readback reports per phase, in PLAXIS's own member
+    # names. Read through candidate lists because the members a phase exposes
+    # are not identical across PLAXIS generations; anything absent is reported
+    # as absent rather than guessed at.
+    _PHASE_OUTCOME_MEMBERS = (
+        ("identification", ("Identification",)),
+        ("number", ("Number",)),
+        ("should_calculate", ("ShouldCalculate",)),
+        ("status", ("CalculationResult",)),
+        ("calculation_type", ("DeformCalcType", "CalculationType")),
+        ("pore_pressure_calculation_type", ("PorePresCalcType", "PoreCalcType")),
+        ("first_step", ("FirstStep",)),
+        ("last_step", ("LastStep",)),
+        ("log", ("LogInfo",)),
+    )
+
+    # CalculationResult is an integer code. These three were read off a live
+    # calculate whose own summary text named which phases did what, so the
+    # mapping is observed rather than guessed: PLAXIS reported Phase_4 as
+    # failed (2), Phases 5-9 as not calculated because their start phase had
+    # not succeeded (0), and the rest as calculated (1). Any other code is
+    # left unnamed -- the raw value is always reported beside this.
+    _PHASE_STATUS_TEXT = {0: "not_calculated", 1: "calculated", 2: "failed"}
+
+    def _phase_outcomes(self, global_object):
+        """Rebuild the per-phase calculation table from the model (WP-F).
+
+        A failed calculate used to deliver "PLAXIS could not execute
+        'calculate'" and nothing else: no failing phase, no log, no step
+        counts. This is the one blocker the smoke test could not diagnose from
+        the MCP side at all, so the table is rebuilt on the failure path as
+        well as the success path.
+        """
+
+        try:
+            phases = list(global_object.Phases)
+        except Exception:
+            return None
+        outcomes = []
+        for index, phase in enumerate(phases):
+            entry = {"index": index, "name": describe_value(read_member_value(phase, "Name"))}
+            path = object_path(phase)
+            if path is not None:
+                entry["path"] = path
+            missing = []
+            for key, candidates in self._PHASE_OUTCOME_MEMBERS:
+                entry[key] = None
+                for member in candidates:
+                    present, value = read_member(phase, member)
+                    if present:
+                        entry[key] = describe_value(value)
+                        break
+                else:
+                    missing.append(candidates[0])
+            if missing:
+                # Absent is a finding, not a blank: an agent reading "log: null"
+                # otherwise cannot tell an empty log from an endpoint that has
+                # no LogInfo member at all.
+                entry["unavailable_members"] = missing
+            entry["status_text"] = self._PHASE_STATUS_TEXT.get(entry.get("status"))
+            outcomes.append(entry)
+        return outcomes
+
     def _calculate(self, global_object, params):
         # calculate's explicit-phases signature is variadic ("calculate
         # Phase_1 Phase_6"), not a parenthesised sequence like activate's --
@@ -782,11 +1284,21 @@ class WorkerRuntime(object):
         # arguments, not passed as a single list argument.
         phase_paths = params.get("phases")
         if phase_paths is None:
-            result = self._call_in_mode(global_object, "stages", "calculate")
+            arguments = ()
         else:
-            phases = resolve_reference_list(global_object, phase_paths, "phases")
-            result = self._call_in_mode(global_object, "stages", "calculate", *phases)
-        return {"phases": phase_paths, "result": describe_value(result)}
+            arguments = tuple(resolve_reference_list(global_object, phase_paths, "phases"))
+        try:
+            result = self._call_in_mode(global_object, "stages", "calculate", *arguments)
+        except WorkerError as exc:
+            details = dict(exc.details or {})
+            details["phases"] = self._phase_outcomes(global_object)
+            exc.details = details
+            raise
+        return {
+            "phases": phase_paths,
+            "result": describe_value(result),
+            "phase_outcomes": self._phase_outcomes(global_object),
+        }
 
     def _set_phase_property(self, global_object, params):
         # setproperties's phase-scoped signature is called ON the target
@@ -796,7 +1308,9 @@ class WorkerRuntime(object):
         target = resolve_reference(global_object, params.get("path"), "path")
         property_name = self._required_string(params, "property")
         phase = resolve_reference(global_object, params.get("phase"), "phase")
-        value = params.get("value")
+        # Same command line, same limitation as set_property: a mapping has no
+        # command-line form and a sequence becomes a parenthesised group.
+        value = self._scalar_value(params, "value")
         result = call_plaxis_command(target, "setproperties", property_name, phase, value)
         return {
             "path": params.get("path"),
@@ -950,6 +1464,182 @@ class WorkerRuntime(object):
         "embedded_beam": "embeddedbeammat",
     }
 
+    # The property names PLAXIS 2D V22 exposes on each material type, listed as
+    # identifiers only: this is API surface, not the vendor's descriptive text,
+    # which is never copied into this repo (see the compliance note in the
+    # error-fidelity plan). Validating against it turns "Unknown property: EA"
+    # -- something only PLAXIS could tell you, after the call -- into a
+    # rejection that names the valid spellings first (WP-E). The list is V22's;
+    # another PLAXIS generation may name things differently, which is why the
+    # rejection message names the way through rather than being a dead end.
+    _MATERIAL_PROPERTIES = {
+        "soil": (
+            "Name", "Comments", "UserFeatures", "Identification", "Colour", "SoilModel", "DrainageType",
+            "gammaUnsat", "gammaSat", "eInit", "nInit", "RayleighDampingInputMethod", "RayleighAlpha",
+            "RayleighBeta", "TargetDamping1", "TargetDamping2", "TargetFrequency1", "TargetFrequency2",
+            "ERef", "nu", "GRef", "EOed", "EInc", "verticalRef", "Vs", "Vp", "cRef", "sURef", "phi",
+            "phiU", "psi", "cInc", "sUInc", "TensionCutOff", "TensileStrength", "E50ref", "EOedRef",
+            "EURRef", "nuUR", "UseAlternatives", "Cc", "Cs", "PowerM", "pRef", "DilatancyCutOff",
+            "eMin", "eMax", "UseDefault", "K0NC", "RF", "G0ref", "gamma07", "lambdaModified",
+            "kappaModified", "MCsl", "muModified", "ET", "nuNT", "EN", "nuTS", "GNT", "NumberOfPlanes",
+            "c1", "phi1", "psi1", "alpha11", "TensionCutOff1", "TensileStrength1", "c2", "phi2", "psi2",
+            "alpha12", "TensionCutOff2", "TensileStrength2", "lambda", "kappa", "sUARef", "sUAInc",
+            "sUCTxsUARatio", "sUPsUARatio", "sUDSSsUARatio", "gammaFC", "gammaFE", "gammaFDSS",
+            "tau0sUARatio", "Erm", "AbsSigmaCI", "HoekBrownParameters", "mb", "s", "a", "mi", "GSI",
+            "D", "SigmaT", "SigmaC", "psiMax", "sigmaPsi", "alphaStar", "v0Dot", "tau", "E28", "fC28",
+            "fC0N", "fCFN", "fCUN", "GC28", "phiMax", "ConcretePsi", "gammatFC", "fT28", "fTUN", "GT28",
+            "gammaFT", "epsCPP", "aDuct", "TimeDependentMechanicalProperties", "tHyd", "E1E28Ratio",
+            "StrengthFunction", "fC1fC28Ratio", "epsPCP1H", "epsPCP8H", "epsPCP24H", "IncludeShrinkage",
+            "epsInfiniteShr", "tShr50", "IncludeCreep", "phiCr", "tCr50", "KBeModified", "KGeModified",
+            "KGpModified", "me", "ne", "UBCSNP", "c", "phiCv", "phiP", "sigT", "N160",
+            "SetToDefaultValues", "FDens", "FEPost", "UBCRF", "nuU", "GMaxtauCRatio", "tauCRef",
+            "tauCInc", "tauEtauCRatio", "tauDSStauCRatio", "tau0tauCRatio",
+            "ExcessPorePressureDetermination", "UndrainedNuDefinitionMethod", "alphaBiot",
+            "nuUEquivalent", "SkemptonB", "Kwn", "GroundwaterClassificationType",
+            "GroundwaterSoilClassStandard", "SWCCFittingMethod", "PermeabilityFittingMethod",
+            "SubsoilTopsoil", "GroundwaterSoilClassUSDA", "GroundwaterSubSoilClassStaring",
+            "GroundwaterTopSoilClassStaring", "ClayFraction", "SiltFraction", "SandFraction",
+            "SaturationResidual", "SaturationSaturated", "GenuchtenGn", "GenuchtenGa", "GenuchtenGl",
+            "GwUseDefaults", "GwDefaultsMethod", "PermeabilityX", "PermeabilityY",
+            "VoidRatioDependency", "Ck", "NInitGroundwater", "GwPsiUnsat", "ThCs", "ThLambdaS", "rhoS",
+            "ExpansionType", "ThAlphaSV", "ThAlphaSX", "ThAlphaSY", "ThAlphaSZ", "PhaseChange",
+            "UnfrozenWaterSaturationMethod", "UnfrozenWaterSaturationTable", "Dv", "fTv",
+            "InterfaceStiffnessMethod", "knInter", "ksInter", "InterfaceStrengthMethod", "Rinter",
+            "RinterResidual", "GapClosure", "DeltaInter", "CrossPermeability", "DrainageConductivity",
+            "HydraulicResistance", "Rthermal", "K0_method", "K0x", "K0z", "K0xIsK0z", "OCR", "POP",
+            "EoedInter", "UDPowerInter", "UDPRefInter", "CInter", "PhiInter", "PsiInter", "DllFile",
+            # Live-verified V22 spellings the object-reference page does not use.
+            # Observed on a real SoilMat (2026-07-24) after the doc-derived list
+            # rejected InterfaceStrengthDetermination, which PLAXIS itself accepts:
+            # the doc says InterfaceStrengthMethod, K0_method, K0x/K0z,
+            # PermeabilityX/Y, Ck, ExpansionType. Both spellings are kept -- this
+            # list exists to catch invented names, not to arbitrate spelling.
+            "InterfaceStiffnessDetermination", "InterfaceStrengthDetermination", "K0Determination",
+            "K0Primary", "K0Secondary", "PermHorizontalPrimary", "PermVertical",
+            "ThermalExpansionType", "cK",
+            "ModelInDll", "User1", "User2", "User3", "User4", "User5", "User6", "User7", "User8",
+            "User9", "User10", "User11", "User12", "User13", "User14", "User15", "User16", "User17",
+            "User18", "User19", "User20", "User21", "User22", "User23", "User24", "User25", "User26",
+            "User27", "User28", "User29", "User30", "User31", "User32", "User33", "User34", "User35",
+            "User36", "User37", "User38", "User39", "User40", "User41", "User42", "User43", "User44",
+            "User45", "User46", "User47", "User48", "User49", "User50",
+        ),
+        "plate": (
+            "Name", "Comments", "UserFeatures", "Identification", "Colour", "MaterialType", "w",
+            "DampingMethod", "RayleighAlpha", "RayleighBeta", "TargetDamping1", "TargetDamping2",
+            "TargetFrequency1", "TargetFrequency2", "PreventPunching", "IsIsotropic", "EA1", "EA2",
+            "E1", "E2", "EI", "StructNu", "d", "Mp", "Np1", "Np2", "MkappaDiagram",
+            "StructuralSpecificHeatCapacity", "ThermalConductivity", "Density", "ThermalExpansion",
+            "AEffT",
+            # Live-verified: PLAXIS exposes "Isotropic"; the doc says "IsIsotropic".
+            "Isotropic",
+        ),
+        "geogrid": (
+            "Name", "Comments", "UserFeatures", "Identification", "Colour", "MaterialType",
+            "IsIsotropic", "Isotropic", "EA1", "EA2", "Np1", "Np2", "N1eps1", "N2eps2", "EA1Short", "EA2Short",
+            "EA1Long", "EA2Long", "RetardationTime", "StructuralSpecificHeatCapacity",
+            "ThermalConductivity", "Density", "ThermalExpansion", "AEffT",
+        ),
+        "anchor": (
+            "Name", "Comments", "UserFeatures", "Identification", "Colour", "MaterialType", "LSpacing",
+            "EA", "FMaxTens", "FMaxComp", "FResTens", "FResComp", "StructuralSpecificHeatCapacity",
+            "ThermalConductivity", "Density", "ThermalExpansion", "AEffT",
+        ),
+        "embedded_beam": (
+            "Name", "Comments", "UserFeatures", "Identification", "Colour", "MaterialType", "Gamma",
+            "DampingMethod", "RayleighAlpha", "RayleighBeta", "TargetDamping1", "TargetDamping2",
+            "TargetFrequency1", "TargetFrequency2", "LSpacing", "CrossSectionType",
+            "PredefinedCrossSectionType", "Diameter", "Thickness", "Width", "A", "I", "E", "Mp", "Np",
+            "AxialSkinResistance", "TSkinStartMax", "TSkinEndMax", "MultiLinearAxialSkinResistance",
+            "TMax", "LateralResistance", "TLatStartMax", "TLatEndMax", "MultiLinearLateralResistance",
+            "Fmax", "DefaultValues", "AxialStiffnessFactor", "LateralStiffnessFactor",
+            "BaseStiffnessFactor",
+        ),
+    }
+    # How many valid names one rejection lists. The total is always stated with
+    # it, so a caller can tell a complete list from a clipped one.
+    _MATERIAL_PROPERTY_SAMPLE = 20
+
+    _MATERIAL_TYPE_NAMES = {
+        "soil": "SoilMat",
+        "plate": "PlateMat",
+        "geogrid": "GeogridMat",
+        "anchor": "AnchorMat",
+        "embedded_beam": "EmbeddedBeamMat",
+    }
+
+    def _live_material_properties(self, global_object, kind):
+        """What a material of this kind in THIS model actually exposes.
+
+        The catalog is a fast accept-list, not an oracle, and two live facts
+        say it cannot be one. PLAXIS's own spellings differ from its object
+        reference in places -- it accepts InterfaceStrengthDetermination where
+        the doc says InterfaceStrengthMethod -- and a soil material exposes a
+        different member set per constitutive model, because plxscripting
+        rebuilds a material's members as its model changes. So a name the
+        catalog does not know is checked against the model before it is
+        refused. This path only ever accepts more, never fewer.
+        """
+
+        type_name = self._MATERIAL_TYPE_NAMES.get(kind)
+        if type_name is None:
+            return None
+        try:
+            materials = list(global_object.Materials)
+        except Exception:
+            return None
+        for material in materials:
+            if read_member_value(material, "TypeName") == type_name:
+                members = safe_dir(material)
+                if members:
+                    return set(members)
+        return None
+
+    def _validate_material_properties(self, global_object, kind, names):
+        known = self._MATERIAL_PROPERTIES.get(kind)
+        if not known:
+            return
+        unknown = [name for name in names if name not in known]
+        if not unknown:
+            return
+        live = self._live_material_properties(global_object, kind)
+        for name in unknown:
+            if live is not None and name in live:
+                continue
+            self._reject_material_property_name(kind, name, known, live)
+
+    def _reject_material_property_name(self, kind, name, known, live):
+        accepted = set(known) | (live or set())
+        for candidate in sorted(accepted):
+            if candidate.lower() == name.lower():
+                raise WorkerError(
+                    "INVALID_ARGUMENT",
+                    "PLAXIS property names are case-sensitive: use '%s', not '%s', for material "
+                    "kind '%s'." % (candidate, name, kind),
+                )
+        checked = (
+            " It is not on an existing %s in this model either."
+            % self._MATERIAL_TYPE_NAMES.get(kind, kind)
+            if live is not None
+            else ""
+        )
+        raise WorkerError(
+            "INVALID_ARGUMENT",
+            "Unknown property '%s' for material kind '%s'.%s PLAXIS 2D V22 names %d properties "
+            "for this kind; the first %d are: %s. If '%s' is valid in your PLAXIS version, create "
+            "the material without it and set it afterwards with set_property on the created "
+            "material."
+            % (
+                name,
+                kind,
+                checked,
+                len(known),
+                min(self._MATERIAL_PROPERTY_SAMPLE, len(known)),
+                ", ".join(known[: self._MATERIAL_PROPERTY_SAMPLE]),
+                name,
+            ),
+        )
+
     def _create_material(self, global_object, params):
         kind = self._choice_string(params, "kind", self._MATERIAL_COMMANDS.keys(), None)
         properties = params.get("properties")
@@ -962,9 +1652,11 @@ class WorkerRuntime(object):
                     "INVALID_ARGUMENT", "properties must be a non-empty object of property-value pairs."
                 )
             args = []
-            for name, value in properties.items():
+            for name in properties:
                 if not isinstance(name, str) or not name:
                     raise WorkerError("INVALID_ARGUMENT", "Every material property name must be a non-empty string.")
+            self._validate_material_properties(global_object, kind, properties)
+            for name, value in properties.items():
                 args.append(name)
                 args.append(value)
             result = call_plaxis_command(global_object, command_name, *args)
@@ -1010,24 +1702,32 @@ class WorkerRuntime(object):
         try:
             phases = global_object.Phases
             iterator = iter(phases)
-        except Exception:
+        except Exception as exc:
             # Observed live: a PLAXIS 2D Input project that has not reached
             # staged construction exposes no Phases collection at all, while
             # the Output endpoint for a calculated project does. Name the
             # likely cause instead of reporting a bare failure.
-            raise WorkerError(
+            raise vendor_error(
                 "PLAXIS_ERROR",
                 "This PLAXIS project exposes no phases. An Input project only lists phases "
                 "once staged construction exists; calculated results are on the Output endpoint.",
+                exc,
             )
         items = []
         for index, phase in enumerate(iterator):
-            items.append({
+            item = {
                 "index": index,
                 "name": describe_value(read_member_value(phase, "Name")),
                 "identification": describe_value(read_member_value(phase, "Identification")),
                 "phase_type": describe_value(read_member_value(phase, "TypeName")),
-            })
+            }
+            # Every object in a result carries the string that can be passed
+            # back (WP-B) -- these two listings predate that rule and were the
+            # ones an agent reads first.
+            path = object_path(phase)
+            if path is not None:
+                item["path"] = path
+            items.append(item)
         return {"count": len(items), "phases": items}
 
     @staticmethod
@@ -1043,17 +1743,459 @@ class WorkerRuntime(object):
             raise WorkerError("PLAXIS_ERROR", "No PLAXIS material collection was found.")
         try:
             iterator = iter(materials)
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS materials could not be read.")
+        except Exception as exc:
+            raise vendor_error("PLAXIS_ERROR", "PLAXIS materials could not be read.", exc)
         items = []
         for index, material in enumerate(iterator):
-            items.append({
+            item = {
                 "index": index,
                 "name": describe_value(read_member_value(material, "Name")),
                 "identification": describe_value(read_member_value(material, "Identification")),
                 "material_type": describe_value(read_member_value(material, "TypeName")),
-            })
+            }
+            path = object_path(material)
+            if path is not None:
+                item["path"] = path
+            items.append(item)
         return {"count": len(items), "materials": items}
+
+    # -- Listings and preflight (WP-G, WP-H) -----------------------------------
+    #
+    # There were listings for phases and materials and nothing else, so an
+    # agent looking for "the soil cluster at x=0-15" fell back to call_method
+    # dump/__dump -- 58 such calls in one smoke-test run, and the source of
+    # nearly every malformed command in the console transcripts.
+
+    _OBJECT_COLLECTIONS = {
+        "point": ("Points",),
+        "line": ("Lines",),
+        "polygon": ("Polygons",),
+        "soil": ("Soils",),
+        "soillayer": ("Soillayers",),
+        "borehole": ("Boreholes",),
+        "plate": ("Plates",),
+        "geogrid": ("Geogrids",),
+        # A 2D model keeps its two anchor kinds in separate collections, and
+        # an embedded beam is listed per row; each item carries the collection
+        # it came from, so a merged listing stays unambiguous.
+        "anchor": ("NodeToNodeAnchors", "FixedEndAnchors"),
+        "embedded_beam": ("EmbeddedBeamRows", "EmbeddedBeams"),
+    }
+    # Enough geometry to pick the object the caller means without a dump
+    # sweep -- never the whole member list, which is what made dump useless.
+    #
+    # Which of these exist depends on the mode PLAXIS is in, and that is why
+    # both spellings are probed. Verified live: in staged/mesh mode every
+    # collection yields CutObjects, which carry BoundingBox, Area and Length
+    # but no x/y; in structures and soil mode the base objects carry x/y. The
+    # ones an object does not have are reported as unavailable, never guessed.
+    _OBJECT_SUMMARY_MEMBERS = {
+        "point": ("x", "y", "BoundingBox"),
+        "line": ("Length", "BoundingBox"),
+        "polygon": ("x", "y", "Area", "BoundingBox"),
+        "borehole": ("x", "Head"),
+        "soil": ("Area", "BoundingBox"),
+        "plate": ("Length", "BoundingBox"),
+        "geogrid": ("Length", "BoundingBox"),
+        "anchor": ("Length", "BoundingBox"),
+        "embedded_beam": ("Length", "BoundingBox"),
+    }
+    _OBJECT_REFERENCE_MEMBERS = {
+        "line": ("First", "Second"),
+        "polygon": ("Material",),
+        "soil": ("Parent", "Material"),
+        "soillayer": ("Soil",),
+        "plate": ("Parent", "Material"),
+        "geogrid": ("Parent", "Material"),
+        "anchor": ("Parent", "Material"),
+        "embedded_beam": ("Parent", "Material"),
+    }
+    # A feature (Soil, Plate, ...) carries no coordinates of its own -- its
+    # geometry lives on the Parent it was built on. Without these, answering
+    # "which soil cluster covers x=0-15, y=6-8" needed a second lookup per
+    # candidate, which is the dump sweep WP-H exists to remove, so the parent's
+    # own coordinates are read straight into the feature's entry.
+    _REFERENCE_GEOMETRY_MEMBERS = {
+        "Parent": ("x", "y", "Length", "Area", "BoundingBox"),
+        "First": ("x", "y"),
+        "Second": ("x", "y"),
+    }
+    # PLAXIS renders a bounding box as one formatted string, verified live:
+    # "min: (0.00; 6.00; 0.00) max: (12.00; 8.00; 0.00)". That is the answer to
+    # "which cluster covers x=0-15, y=6-8", but only after parsing, so the
+    # numbers are published beside the original -- never instead of it.
+    _BOUNDING_BOX_PATTERN = re.compile(
+        r"min:\s*\(([^)]*)\)\s*max:\s*\(([^)]*)\)", re.IGNORECASE
+    )
+    _BOUNDING_BOX_AXES = ("x", "y", "z")
+
+    @classmethod
+    def _parse_bounding_box(cls, described):
+        """Turn PLAXIS's bounding-box string into per-axis [min, max] numbers."""
+
+        if not isinstance(described, str):
+            return None
+        match = cls._BOUNDING_BOX_PATTERN.search(described)
+        if match is None:
+            return None
+        bounds = {}
+        for axis, low, high in zip(
+            cls._BOUNDING_BOX_AXES,
+            match.group(1).split(";"),
+            match.group(2).split(";"),
+        ):
+            try:
+                bounds[axis] = [float(low.strip()), float(high.strip())]
+            except (TypeError, ValueError):
+                return None
+        return bounds or None
+
+    @staticmethod
+    def _coordinate_range(described):
+        """[min, max] for a coordinate PLAXIS returns as a sequence.
+
+        A polygon reports its vertex coordinates, so the bounds a caller
+        actually asks in are one step away from the raw value. Derived only
+        from an all-numeric sequence, and named as a range so nothing mistakes
+        it for a value PLAXIS itself reported.
+        """
+
+        if not isinstance(described, (list, tuple)) or not described:
+            return None
+        numbers = [
+            item for item in described
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
+        ]
+        if len(numbers) != len(described):
+            return None
+        return [min(numbers), max(numbers)]
+
+    @classmethod
+    def _summarise_members(cls, item, members):
+        """Read a short member list, reporting absence rather than hiding it."""
+
+        summary, missing = {}, []
+        for member in members:
+            present, value = read_member(item, member)
+            if not present:
+                missing.append(member)
+                continue
+            described = describe_value(value)
+            summary[member] = described
+            span = cls._coordinate_range(described)
+            if span is not None:
+                summary[member + "_range"] = span
+            bounds = cls._parse_bounding_box(described)
+            if bounds is not None:
+                summary["bounds"] = bounds
+        return summary, missing
+
+    @classmethod
+    def _reference_summary(cls, value, geometry_members=()):
+        """Describe a referenced object as the path that can be passed back."""
+
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return describe_value(value)
+        summary = {}
+        path = object_path(value)
+        if path is not None:
+            summary["path"] = path
+        identification = read_member_value(value, "Identification")
+        if isinstance(identification, (str, bool, int, float)):
+            summary["identification"] = identification
+        geometry, _ = cls._summarise_members(value, geometry_members)
+        if geometry:
+            summary["geometry"] = geometry
+        return summary or None
+
+    def _describe_listed_object(self, kind, collection, index, item):
+        entry = {
+            "index": index,
+            "collection": collection,
+            "name": describe_value(read_member_value(item, "Name")),
+            "identification": describe_value(read_member_value(item, "Identification")),
+            "type_name": describe_value(read_member_value(item, "TypeName")),
+        }
+        path = object_path(item)
+        if path is not None:
+            entry["path"] = path
+        geometry, missing = self._summarise_members(
+            item, self._OBJECT_SUMMARY_MEMBERS.get(kind, ())
+        )
+        if geometry:
+            entry["geometry"] = geometry
+        references = {}
+        for member in self._OBJECT_REFERENCE_MEMBERS.get(kind, ()):
+            present, value = read_member(item, member)
+            if present:
+                references[member] = self._reference_summary(
+                    value, self._REFERENCE_GEOMETRY_MEMBERS.get(member, ())
+                )
+            else:
+                missing.append(member)
+        if references:
+            entry["references"] = references
+        if missing:
+            # Stated, not silent: a caller must be able to tell a member this
+            # object does not have from one that was never looked at.
+            entry["unavailable_members"] = missing
+        return entry
+
+    def _list_objects(self, global_object, params):
+        kind = self._choice_string(params, "kind", self._OBJECT_COLLECTIONS.keys(), None)
+        offset = self._nonnegative_integer(params, "offset", 0)
+        limit = self._bounded_integer(params, "limit", 200, 1, 2000)
+        found, missing = [], []
+        for collection in self._OBJECT_COLLECTIONS[kind]:
+            try:
+                items = list(getattr(global_object, collection))
+            except Exception:
+                missing.append(collection)
+                continue
+            found.append((collection, items))
+        if not found:
+            raise WorkerError(
+                "PLAXIS_ERROR",
+                "This PLAXIS endpoint exposes no %s collection (%s). A collection appears only "
+                "once the model has an object of that kind, and only in a mode that shows it."
+                % (kind, ", ".join(missing)),
+            )
+        flattened = [
+            (collection, index, item)
+            for collection, items in found
+            for index, item in enumerate(items)
+        ]
+        page = flattened[offset : offset + limit]
+        objects = [
+            self._describe_listed_object(kind, collection, index, item)
+            for collection, index, item in page
+        ]
+        returned_count = len(objects)
+        has_more = offset + returned_count < len(flattened)
+        result = {
+            "kind": kind,
+            "collections": [collection for collection, _ in found],
+            "count": len(flattened),
+            "offset": offset,
+            "limit": limit,
+            "returned_count": returned_count,
+            "has_more": has_more,
+            "next_offset": offset + returned_count if has_more else None,
+            "objects": objects,
+        }
+        if missing:
+            result["unavailable_collections"] = missing
+        return result
+
+    # Feature collections whose members must carry a material before PLAXIS
+    # will calculate. Kept separate from _OBJECT_COLLECTIONS: this is the
+    # calculable-model question, not the "show me what exists" one.
+    _MATERIAL_BEARING_COLLECTIONS = (
+        "Soils", "Plates", "Geogrids", "NodeToNodeAnchors", "FixedEndAnchors", "EmbeddedBeamRows",
+    )
+    # A preflight must stay cheap; every member read is a PLAXIS round trip.
+    # Hitting this cap is reported, never absorbed.
+    _MODEL_STATE_SCAN_LIMIT = 500
+    # Model.MeshStatus.Status is the only mesh-staleness candidate PLAXIS
+    # exposes, and on 2D V22 it is not one. Verified live on the smoke-test
+    # fixture (2026-07-24): Status read 1 when freshly opened, still 1 after a
+    # meshed geometry point was moved from y=8 to y=-3.5, and still 1 after a
+    # soil-layer Top change -- with NumberOfElements frozen at its old 298
+    # throughout. So an element count proves a mesh was generated once, never
+    # that it matches the geometry now, and no arithmetic on these two numbers
+    # can recover the difference.
+    #
+    # The markers below therefore only ever run against a *textual* status, in
+    # case another PLAXIS generation reports one. V22's integer lands in
+    # "not_available", which is stated as a standing caveat rather than folded
+    # into blocking or unknown: a limit of the API is not a finding about the
+    # model, and pretending either way is what produces a false clean bill.
+    _MESH_STALE_MARKERS = (
+        "regenerat", "outdated", "out of date", "not up to date", "stale", "invalid",
+        "no mesh", "none", "absent", "missing", "failed", "error",
+    )
+    _MESH_READY_MARKERS = ("up to date", "ok", "generated", "valid", "success", "done")
+    _MESH_STALENESS_UNAVAILABLE = (
+        "PLAXIS reports its mesh status as a code (%r) with no documented meaning, and it was "
+        "observed not to change after a geometry edit -- so whether the mesh still matches the "
+        "geometry cannot be read here. Regenerate the mesh if the geometry changed since it was "
+        "built."
+    )
+
+    @classmethod
+    def _mesh_staleness(cls, status):
+        """Classify a reported mesh status: ready, stale, unrecognised, or absent."""
+
+        if status is None:
+            return "not_available"
+        if not isinstance(status, str):
+            # An enum code. V22's does not move with the geometry (see above).
+            return "not_available"
+        if not status.strip():
+            return "not_available"
+        text = status.strip().lower()
+        # Stale first: "not up to date" contains "up to date".
+        for marker in cls._MESH_STALE_MARKERS:
+            if marker in text:
+                return "stale"
+        for marker in cls._MESH_READY_MARKERS:
+            if marker in text:
+                return "ready"
+        return "unrecognised"
+
+    def _mesh_state(self, global_object):
+        model = read_member_value(global_object, "Model")
+        if model is None:
+            return {
+                "available": False,
+                "reason": "This PLAXIS endpoint exposes no Model object, which is where mesh "
+                          "status lives.",
+            }
+        present, status = read_member(model, "MeshStatus")
+        if not present:
+            return {
+                "available": False,
+                "reason": "This PLAXIS Model object exposes no MeshStatus member.",
+            }
+        state = {"available": True}
+        missing = []
+        for key, member in (
+            ("status", "Status"),
+            ("element_count", "NumberOfElements"),
+            ("node_count", "NumberOfNodes"),
+        ):
+            found, value = read_member(status, member)
+            if found:
+                state[key] = describe_value(value)
+            else:
+                missing.append(member)
+                state[key] = None
+        feedback_present, feedback = read_member(model, "MeshFeedback")
+        if feedback_present:
+            state["feedback"] = describe_value(feedback)
+        else:
+            missing.append("MeshFeedback")
+        state["staleness"] = self._mesh_staleness(state.get("status"))
+        if missing:
+            state["unavailable_members"] = missing
+        return state
+
+    def _unassigned_materials(self, global_object):
+        unassigned, scanned, truncated = [], 0, False
+        for collection in self._MATERIAL_BEARING_COLLECTIONS:
+            try:
+                items = list(getattr(global_object, collection))
+            except Exception:
+                continue
+            for item in items:
+                if scanned >= self._MODEL_STATE_SCAN_LIMIT:
+                    truncated = True
+                    break
+                scanned += 1
+                present, material = read_member(item, "Material")
+                if present and material is not None:
+                    continue
+                entry = {"collection": collection, "name": describe_value(read_member_value(item, "Name"))}
+                path = object_path(item)
+                if path is not None:
+                    entry["path"] = path
+                unassigned.append(entry)
+            if truncated:
+                break
+        result = {"scanned": scanned, "count": len(unassigned), "features": unassigned}
+        if truncated:
+            result["scan_truncated"] = True
+            result["scan_limit"] = self._MODEL_STATE_SCAN_LIMIT
+        return result
+
+    def _model_state(self, global_object, params):
+        """Answer "is this model calculable?" without changing anything (WP-G).
+
+        Every section reports what it could actually read. A check that could
+        not be evaluated is named in "unknown" instead of being folded into
+        "blocking", because "nothing is blocking" and "nothing could be
+        checked" are different answers and an agent acts differently on each.
+        """
+
+        mesh = self._mesh_state(global_object)
+        phases = self._phase_outcomes(global_object)
+        materials = self._unassigned_materials(global_object)
+        blocking, unknown, caveats = [], [], []
+
+        if not mesh.get("available"):
+            unknown.append("mesh: " + str(mesh.get("reason", "mesh status is not readable")))
+        elif isinstance(mesh.get("element_count"), int) and mesh["element_count"] <= 0:
+            blocking.append("No mesh has been generated; run generate_mesh before calculating.")
+        elif mesh.get("staleness") == "stale":
+            blocking.append(
+                "PLAXIS reports the mesh as %s; regenerate it with generate_mesh before "
+                "calculating." % mesh.get("status")
+            )
+        elif mesh.get("element_count") is None:
+            unknown.append("mesh: PLAXIS reported no element count.")
+        elif mesh.get("staleness") == "not_available":
+            caveats.append(self._MESH_STALENESS_UNAVAILABLE % (mesh.get("status"),))
+        elif mesh.get("staleness") != "ready":
+            unknown.append(
+                "mesh: PLAXIS reported status %r, which this build does not recognise as either "
+                "up to date or stale." % (mesh.get("status"),)
+            )
+
+        if phases is None:
+            unknown.append(
+                "phases: this project exposes no Phases collection, so no phase check ran."
+            )
+        else:
+            marked = [phase for phase in phases if phase.get("should_calculate") is True]
+            unmarked_unknown = [
+                phase for phase in phases if phase.get("should_calculate") is None
+            ]
+            if not phases:
+                blocking.append("The model has no phases; create one before calculating.")
+            elif len(phases) == 1:
+                blocking.append(
+                    "The model has only the initial phase; create a phase before calculating."
+                )
+            elif not marked and not unmarked_unknown:
+                blocking.append(
+                    "No phase is marked for calculation (ShouldCalculate is false on every phase)."
+                )
+            if unmarked_unknown:
+                unknown.append(
+                    "phases: %d phase(s) do not expose ShouldCalculate." % len(unmarked_unknown)
+                )
+
+        if materials["count"]:
+            blocking.append(
+                "%d feature(s) have no material assigned: %s."
+                % (
+                    materials["count"],
+                    ", ".join(
+                        str(feature.get("path") or feature.get("name"))
+                        for feature in materials["features"][:10]
+                    ),
+                )
+            )
+        if materials.get("scan_truncated"):
+            unknown.append(
+                "materials: the feature scan stopped at %d features, so later features were not "
+                "checked." % materials["scan_limit"]
+            )
+
+        return {
+            "mesh": mesh,
+            "phase_count": None if phases is None else len(phases),
+            "phases": phases,
+            "unassigned_materials": materials,
+            "blocking": blocking,
+            "unknown": unknown,
+            # A caveat is a limit of what PLAXIS exposes, not a finding about
+            # this model -- kept out of "unknown" so a check that genuinely did
+            # not run stays visible, and out of "blocking" so it is not read as
+            # a fault. It is always worth showing next to calculable.
+            "caveats": caveats,
+            "calculable": None if unknown else not blocking,
+        }
 
     @staticmethod
     def _project_info(global_object):
@@ -1118,8 +2260,10 @@ class WorkerRuntime(object):
         call_args = (phase, result_type, fem_type) if smoothing is None else (phase, result_type, fem_type, smoothing)
         try:
             results = list(getresults(*call_args))
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not retrieve the requested results.")
+        except Exception as exc:
+            raise vendor_error(
+                "PLAXIS_ERROR", "PLAXIS could not retrieve the requested results.", exc
+            )
         count = len(results)
         page = results[offset : offset + limit]
         serialized = [describe_value(item, max_items=limit) for item in page]
@@ -1176,8 +2320,10 @@ class WorkerRuntime(object):
             raise WorkerError("WRONG_ROLE", "Connected PLAXIS endpoint does not expose Output results.")
         try:
             result = getsingleresult(*call_args)
-        except Exception:
-            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not retrieve the requested result.")
+        except Exception as exc:
+            raise vendor_error(
+                "PLAXIS_ERROR", "PLAXIS could not retrieve the requested result.", exc
+            )
         return {
             "phase": describe_value(phase),
             "result_type_path": result_type_path,
@@ -1386,17 +2532,40 @@ class WorkerRuntime(object):
     def _success_response(self, request_id, result):
         return {"protocol": PROTOCOL_VERSION, "id": request_id, "ok": True, "result": result}
 
-    def _error_response(self, request_id, code, message, retryable=False):
+    def _error_response(
+        self,
+        request_id,
+        code,
+        message,
+        retryable=False,
+        plaxis_message=None,
+        plaxis_message_truncated=False,
+        details=None,
+    ):
+        error = {
+            "code": code,
+            "message": self._sanitize(message),
+            "retryable": bool(retryable),
+            "state": self._state,
+        }
+        if plaxis_message:
+            error["plaxis_message"] = self._sanitize(plaxis_message)
+            # Only ever present when something really was dropped, and never
+            # signalled inside the text itself.
+            if plaxis_message_truncated:
+                error["plaxis_message_truncated"] = True
+        if details:
+            # Building an error must not be able to raise: a details payload
+            # that cannot be serialised loses the details, never the error.
+            try:
+                error["details"] = self._json_value(details)
+            except Exception:
+                pass
         return {
             "protocol": PROTOCOL_VERSION,
             "id": request_id,
             "ok": False,
-            "error": {
-                "code": code,
-                "message": self._sanitize(message),
-                "retryable": bool(retryable),
-                "state": self._state,
-            },
+            "error": error,
         }
 
     def _json_value(self, value, depth=0, max_depth=8, max_items=10000):

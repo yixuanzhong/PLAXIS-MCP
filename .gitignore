@@ -15,3 +15,9 @@ build/
 !.env.example
 profiles/*.local.toml
 profiles/*.local.json
+
+# PLAXIS autosaves a timestamped copy of a project when one is opened and then
+# discarded, which is what a live regression against tests/ leaves behind. The
+# checked-in tests/test.p2dx fixture is unaffected (it is already tracked).
+mcp-smoketest_*.p2dx
+mcp-smoketest_*.p2dxdat/

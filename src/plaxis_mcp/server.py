@@ -63,15 +63,14 @@ _DEFAULT_PORTS = {
     PlaxisRole.OUTPUT: 10001,
 }
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
-JsonValue: TypeAlias = (
-    StrictStr
-    | StrictInt
-    | StrictFloat
-    | StrictBool
-    | None
-    | list[Any]
-    | dict[str, Any]
-)
+# Everything PLAXIS can actually receive as one value. plxscripting builds
+# every call as a command line, where a mapping has no representation at all
+# and a sequence becomes a parenthesised group -- so the dict and list arms of
+# the old JsonValue alias were never values PLAXIS could take, and admitting
+# them only moved the failure to PLAXIS's parser. To point a property at
+# another object, pass that object's `path` string to a tool that takes
+# references (WP-B/WP-H).
+ScalarValue: TypeAlias = StrictStr | StrictInt | StrictFloat | StrictBool | None
 
 
 @dataclass(frozen=True)
@@ -82,7 +81,9 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int | None = None
     password: str = field(default="", repr=False)
-    connect_timeout: float = 5.0
+    # See EndpointProfile.connect_timeout_seconds: PLAXIS is routinely busy for
+    # several seconds after new_project, and 5 s was below that (WP-I).
+    connect_timeout: float = 15.0
     request_timeout: float = 240.0
     worker_python: str | None = None
     runtime_profile: str = "unconfigured"
@@ -174,7 +175,7 @@ def load_server_config(environment: Mapping[str, str] | None = None) -> ServerCo
             environment,
             prefix + "_CONNECT_TIMEOUT",
             ("PLAXIS_CONNECT_TIMEOUT", "PLAXIS_TIMEOUT"),
-            "5",
+            "15",
         ),
         prefix + "_CONNECT_TIMEOUT",
     )
@@ -412,6 +413,15 @@ _STAGE_MUTATOR = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=False,
 )
+# view_results changes no model content -- it hands a calculated phase to the
+# separate PLAXIS Output application. Not read-only (it drives another
+# process), not destructive, and asking twice for the same phase is a no-op.
+_VIEW_RESULTS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 
 
 def _set_version(server: FastMCP) -> None:
@@ -471,6 +481,18 @@ def _bridge_error_result(
         "retryable": retryable,
         "state": state,
     }
+    # PLAXIS's own words about the failure, and any structured evidence the
+    # operation rebuilt, travel as their own fields (WP-A/WP-F). Present only
+    # when there is something to say, so an unchanged failure keeps its
+    # existing shape.
+    plaxis_message = getattr(error, "plaxis_message", None)
+    if plaxis_message:
+        payload["plaxis_message"] = plaxis_message
+        if getattr(error, "plaxis_message_truncated", False):
+            payload["plaxis_message_truncated"] = True
+    details = getattr(error, "details", None)
+    if details:
+        payload["details"] = details
     return mcp_types.CallToolResult(
         content=[mcp_types.TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))],
         structuredContent=payload,
@@ -599,12 +621,61 @@ def create_server(
 
     if config.role is PlaxisRole.INPUT:
 
+        @server.tool(annotations=_READ, structured_output=True)
+        def list_objects(
+            kind: Literal[
+                "point", "line", "polygon", "soil", "soillayer", "borehole",
+                "plate", "geogrid", "anchor", "embedded_beam",
+            ],
+            offset: Annotated[StrictInt, Field(ge=0)] = 0,
+            limit: Annotated[StrictInt, Field(ge=1, le=2000)] = 200,
+        ) -> dict[str, Any]:
+            """List the model objects of one kind, with the path to pass back.
+
+            Each object carries `path` (the exact string every reference
+            parameter accepts), its identification, and a short geometry or
+            material summary -- enough to pick the object you mean without
+            probing members one at a time.
+            """
+
+            return _invoke(session, "list_objects", kind=kind, offset=offset, limit=limit)
+
+        @server.tool(annotations=_READ, structured_output=True)
+        def model_state() -> dict[str, Any]:
+            """Report whether the model can be calculated, and what is stopping it.
+
+            Read-only. Returns mesh status and element counts, the phase table
+            with each phase's marked-for-calculation flag, and any features
+            with no material assigned. `blocking` lists what would stop a
+            calculate; `unknown` lists the checks that could not be evaluated
+            on this endpoint, so an empty `blocking` is never mistaken for a
+            clean bill of health.
+            """
+
+            return _invoke(session, "model_state")
+
         @server.tool(annotations=_SET_PROPERTY, structured_output=True)
         def set_property(
             path: Annotated[StrictStr, Field(min_length=1)],
-            value: JsonValue,
+            value: Annotated[
+                ScalarValue,
+                Field(
+                    description=(
+                        "A single scalar: number, string, boolean, or null. To point a "
+                        "feature at a material use assign_material; to reference any other "
+                        "object, pass its `path` string to a tool that takes references."
+                    )
+                ),
+            ],
         ) -> dict[str, Any]:
-            """Set a writable PLAXIS property using a dotted path."""
+            """Set a writable PLAXIS property using a dotted path.
+
+            For a material reference such as Plate_1.Material use
+            assign_material instead -- PLAXIS needs a real object there, and no
+            string spelling of the material's name works through this tool.
+            Setting Identification renames the object, which changes the `path`
+            every later call must use.
+            """
 
             return _invoke(session, "set_property", path=path, value=value)
 
@@ -612,17 +683,18 @@ def create_server(
         def call_method(
             method: Annotated[StrictStr, Field(min_length=1)],
             path: StrictStr = "",
-            args: list[JsonValue] | None = None,
+            args: list[ScalarValue] | None = None,
         ) -> dict[str, Any]:
             """Call an explicitly named PLAXIS method with literal positional arguments.
 
-            Every argument must be a literal value (number, string, boolean, or an
-            array/object of literals) -- there is no way to pass a reference to
-            another PLAXIS object or phase through this tool. A string argument is
-            sent to PLAXIS as a quoted text literal, not as a reference, so it
-            cannot stand in for an object or phase parameter even when it names
-            one. Use this only for methods whose PLAXIS command reference shows
-            purely literal parameters (numbers, text, booleans).
+            Every argument must be a scalar literal (number, string, boolean,
+            or null) -- there is no way to pass a reference to another PLAXIS
+            object or phase through this tool. A string argument is sent to
+            PLAXIS as a quoted text literal, not as a reference, so it cannot
+            stand in for an object or phase parameter even when it names one.
+            Use this only for methods whose PLAXIS command reference shows
+            purely literal parameters; prefer list_objects, model_state, and
+            the first-class tools over probing with dump.
             """
 
             return _invoke(session, "call_method", path=path, method=method, args=args or [])
@@ -707,12 +779,25 @@ def create_server(
 
             return _invoke(session, "calculate", phases=phases)
 
+        @server.tool(annotations=_VIEW_RESULTS, structured_output=True)
+        def view_results(phase: Annotated[StrictStr, Field(min_length=1)]) -> dict[str, Any]:
+            """Open a calculated phase in the PLAXIS Output application.
+
+            This is the only route from a calculated Input model to the Output
+            endpoint's results: Output reads whatever its application has open,
+            and the Output role deliberately has no open_project. Call this for
+            a phase whose status is "calculated", then read results through the
+            Output server.
+            """
+
+            return _invoke(session, "view_results", phase=phase)
+
         @server.tool(annotations=_STAGE_MUTATOR, structured_output=True)
         def set_phase_property(
             path: Annotated[StrictStr, Field(min_length=1)],
             property: Annotated[StrictStr, Field(min_length=1)],
             phase: Annotated[StrictStr, Field(min_length=1)],
-            value: JsonValue,
+            value: ScalarValue,
         ) -> dict[str, Any]:
             """Set a property of an object for one specific phase only.
 
@@ -799,14 +884,21 @@ def create_server(
         @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
         def create_material(
             kind: Literal["soil", "plate", "geogrid", "anchor", "embedded_beam"],
-            properties: dict[str, JsonValue] | None = None,
+            properties: dict[str, ScalarValue] | None = None,
         ) -> dict[str, Any]:
             """Create a material set.
 
             Omit properties to create a placeholder material that cannot be
             used to calculate until edited; provide a property/value map
             (matching PLAXIS's own property names, e.g. "SoilModel",
-            "gammaUnsat") to create a usable material in one call.
+            "gammaUnsat") to create a usable material in one call. Property
+            names are checked against the names PLAXIS 2D V22 exposes for that
+            kind and are case-sensitive.
+
+            "Identification" renames the material: after
+            create_material(kind="soil", properties={"Identification": "SZ"}),
+            the object's path is "SZ", and that is what every later call --
+            assign_material included -- must use.
             """
 
             return _invoke(session, "create_material", kind=kind, properties=properties)

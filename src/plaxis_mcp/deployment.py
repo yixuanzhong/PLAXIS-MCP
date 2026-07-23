@@ -192,7 +192,12 @@ class EndpointProfile:
     host: str
     port: int
     credential_target: str
-    connect_timeout_seconds: float = 5.0
+    # 15 s, not 5: PLAXIS stays busy for several seconds after new_project or
+    # open_project, and a connect landing in that window used to fail outright
+    # (WP-I). A profile generated before this change keeps its own 5.0 until
+    # it is regenerated -- a stored value is the operator's, not ours to
+    # silently raise.
+    connect_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 240.0
     legacy_security_accepted: bool = False
     schema_version: int = PROFILE_SCHEMA_VERSION
@@ -259,7 +264,7 @@ def endpoint_profile_for(
     *,
     host: str = "127.0.0.1",
     port: int | None = None,
-    connect_timeout_seconds: float = 5.0,
+    connect_timeout_seconds: float = 15.0,
     request_timeout_seconds: float = 240.0,
     legacy_security_accepted: bool = False,
 ) -> EndpointProfile:
@@ -421,7 +426,7 @@ def load_profile(path: Path | str, *, verify_installation: bool = True) -> Endpo
             installation_root=Path(values["installation_root"]),
             host=values["host"], port=values["port"],
             credential_target=values["credential_target"],
-            connect_timeout_seconds=values.get("connect_timeout_seconds", 5.0),
+            connect_timeout_seconds=values.get("connect_timeout_seconds", 15.0),
             request_timeout_seconds=values.get("request_timeout_seconds", 240.0),
             legacy_security_accepted=values.get("legacy_security_accepted", False),
             schema_version=values["schema_version"],

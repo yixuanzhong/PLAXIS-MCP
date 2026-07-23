@@ -22,6 +22,6 @@ installation_root = ""
 host = "127.0.0.1"
 port = 10000
 credential_target = "Caros/PLAXIS-MCP/INSTALLATION_ID/input"
-connect_timeout_seconds = 5.0
+connect_timeout_seconds = 15.0
 request_timeout_seconds = 240.0
 legacy_security_accepted = false
