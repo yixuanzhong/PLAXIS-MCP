@@ -43,14 +43,21 @@ SHA-256 in `artifact-manifest.json`, the vendor-redistribution gate, and the
 explicitly non-production exception to the signature check; it never skips
 manifest validation.
 
-Clients launch the same stable host path with an absolute generated profile:
+Clients launch the same stable host path against a generated profile, named
+either by role or by absolute path:
 
 ```powershell
+& "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\plaxis-mcp.exe" serve --role input
 & "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\plaxis-mcp.exe" serve --config `
   "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\input.toml"
 ```
 
-The `serve --config` command must reject environment endpoint/password
-overrides. A single artifact exposes hidden-input `credentials` and `profiles`
+`--role` resolves the profiles directory that `install_windows.ps1` populates,
+so a client configuration carries no per-account absolute path. Either form
+must reject environment endpoint/password overrides.
+
+A single artifact exposes hidden-input `setup`, `credentials` and `profiles`
 subcommands by delegating to `plaxis_mcp.deployment`; source installs also
-provide `plaxis-mcp-credentials` and `plaxis-mcp-profiles` console scripts.
+provide `plaxis-mcp-setup`, `plaxis-mcp-credentials` and `plaxis-mcp-profiles`
+console scripts. `plaxis-mcp.exe --version` reports the package version without
+starting a server, which is what the Caros packaging preflight reads.

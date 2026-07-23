@@ -4,27 +4,22 @@
     "key -- see the client-specific examples in this directory (VS Code uses",
     "`servers`, Codex uses `mcp_servers` TOML sections, Caros uses `extensions`",
     "in config.yaml).",
-    "Replace <YOU> with the Windows account that ran the PLAXIS-MCP installer.",
-    "No password appears here: the profile names a Windows Credential Manager",
-    "target, and `serve --config` refuses to start if any PLAXIS_* endpoint",
-    "environment override is set."
+    "Replace <YOU> with the Windows account that ran the PLAXIS-MCP installer,",
+    "or use `uvx` with args [\"plaxis-mcp\", \"serve\", \"--role\", \"input\"]",
+    "for a PyPI install.",
+    "Run `plaxis-mcp.exe setup` once per machine before first use.",
+    "No password appears here: --role reads the generated profile, which names",
+    "a Windows Credential Manager target, and `serve` refuses to start if any",
+    "PLAXIS_* endpoint environment override is set."
   ],
   "mcpServers": {
     "plaxis-input": {
       "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
-      "args": [
-        "serve",
-        "--config",
-        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\input.toml"
-      ]
+      "args": ["serve", "--role", "input"]
     },
     "plaxis-output": {
       "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
-      "args": [
-        "serve",
-        "--config",
-        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\output.toml"
-      ]
+      "args": ["serve", "--role", "output"]
     }
   }
 }

@@ -1,5 +1,7 @@
 # PLAXIS-MCP
 
+mcp-name: io.github.yixuanzhong/plaxis-mcp
+
 `plaxis-mcp` is a Windows-local, stdio Model Context Protocol (MCP) server for
 PLAXIS Remote Scripting. It is client-neutral: Caros, Codex, Claude Code,
 Cursor, VS Code/Copilot, and other conforming local stdio MCP clients connect
@@ -52,33 +54,42 @@ Docker, WSL, remote MCP transports, and PLAXIS bundles copied into a Python
 environment are not supported deployment paths for v0.2.0. The former Docker
 artifacts have intentionally been removed.
 
-## Install and run
+## Set up once, then launch from any client
 
-The supported deployment is the signed package. Install it, generate the two
-profiles, then store each role password in Windows Credential Manager:
+Setup is per machine, not per client. One command discovers the PLAXIS
+installation, generates the two role profiles, and stores both role passwords
+in Windows Credential Manager:
 
 ```powershell
-plaxis-mcp.exe profiles --output-dir "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles"
-plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\input.toml"
-plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\output.toml"
+plaxis-mcp.exe setup
 ```
 
-`credentials set` reads the password with a hidden prompt. It has no password
-argument, so the value never reaches command history, agent configuration, or
-logs.
+The passwords are read with hidden prompts. There is no password argument, so
+the value never reaches command history, agent configuration, or logs. Add
+`--skip-credentials` to generate the profiles now and store the passwords later
+with `plaxis-mcp.exe credentials set --profile <profile.toml>`.
+
+Profiles land in `%LOCALAPPDATA%\Caros\PLAXIS-MCP\profiles` (override with
+`--profile-dir`). That single location is shared by every client on the machine,
+so Caros, Claude Code, Codex, Cursor and VS Code all run against the same
+installation binding and the same stored passwords. The directory name is
+historical — it is where the first supported installer wrote — and is kept
+because `credential_target` is derived from it.
 
 Run each role as a separate process. The host never connects at startup; use
 the `connect` tool after PLAXIS is running.
 
 ```powershell
-plaxis-mcp.exe serve --config "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\input.toml"
-plaxis-mcp.exe serve --config "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\output.toml"
+plaxis-mcp.exe serve --role input
+plaxis-mcp.exe serve --role output
 ```
 
-`serve --config` takes every endpoint setting from the profile and the password
-from Windows Credential Manager. It **fails to start** if any `PLAXIS_*`
-endpoint environment override is present, so a client cannot silently redirect
-an endpoint or inject a password. See `examples/` for each certified client.
+`--role` resolves that role's profile from the profiles directory.
+`--config <profile.toml>` names one explicitly and is equivalent. Either way
+`serve` takes every endpoint setting from the profile and the password from
+Windows Credential Manager, and it **fails to start** if any `PLAXIS_*` endpoint
+environment override is present, so a client cannot silently redirect an
+endpoint or inject a password. See `examples/` for each certified client.
 
 A profile is bound to one installation: `credential_target` is derived from
 `installation_root`, and `worker_python` must be an interpreter that discovery
@@ -86,11 +97,29 @@ links to that same root. Editing any of the three by hand makes the profile
 fail to load. This is what stops a profile from handing a stored PLAXIS
 password to an arbitrary executable.
 
+### Getting the host
+
+Two distributions, with different assurances:
+
+| Distribution | Command | Assurances |
+| --- | --- | --- |
+| Signed Windows package | `plaxis-mcp.exe` | Authenticode-signed, hash-manifested, installer-verified. The supported production deployment. |
+| PyPI | `uvx plaxis-mcp serve --role input` or `py -3.13 -m pip install plaxis-mcp` | Ordinary Python source distribution. **No** code signature and **no** artifact manifest. |
+
+Both expose the same `setup`, `serve`, `credentials` and `profiles` commands and
+enforce the same profile binding and environment-override rejection, so a PyPI
+install is not a weaker *runtime* posture — but it carries no supply-chain
+attestation of its own beyond PyPI's, and it is not what an organization
+requiring signed binaries should deploy.
+
+Do not install `plxscripting` into the host environment under either.
+
 ### Source/developer launch only
 
-A clean CPython 3.13 environment can run the module directly. This path is
-**not** supported for deployment: it carries the password in the environment
-and performs no installation binding.
+A clean CPython 3.13 environment can also run the module directly with
+endpoint environment variables. This path is **not** supported for deployment:
+it carries the password in the environment and performs no installation
+binding.
 
 ```powershell
 py -3.13 -m pip install .
@@ -114,8 +143,13 @@ separate MCP servers when it needs both.
 
 | Role | Default endpoint | Tools |
 | --- | --- | --- |
-| Input | `127.0.0.1:10000` | `connect`, `disconnect`, `connection_status`, `list_members`, `inspect`, `project_info`, `list_phases`, `list_materials`, `set_property`, `call_method`, `new_project`, `open_project`, `close_project`, `recover_project`, `save_project` |
-| Output | `127.0.0.1:10001` | `connect`, `disconnect`, `connection_status`, `list_members`, `inspect`, `project_info`, `list_phases`, `list_materials`, `list_result_types`, `get_results` |
+| Both | — | `connect`, `disconnect`, `connection_status`, `list_members`, `inspect`, `project_info`, `list_phases`, `list_materials` |
+| Input only | `127.0.0.1:10000` | `set_property`, `call_method`, `new_project`, `open_project`, `close_project`, `recover_project`, `save_project`, `create_phase`, `set_current_phase`, `set_phase_property`, `activate`, `deactivate`, `calculate`, `set_mode`, `generate_mesh`, `create_point`, `create_line`, `create_polygon`, `create_borehole`, `create_soillayer`, `create_material`, `assign_material`, `create_structural_element` |
+| Output only | `127.0.0.1:10001` | `list_result_types`, `get_results`, `get_single_result` |
+
+That is 31 Input tools and 11 Output tools. `generate_mesh`, `create_phase` and
+`calculate` enter the PLAXIS mode they need before running, so a workflow does
+not have to interleave `set_mode` calls.
 
 `connect()` has no endpoint or credential arguments. It uses only the pinned
 role configuration, so an agent cannot redirect a stored password to an
@@ -129,10 +163,11 @@ supports lossless pagination. `limit` is between 1 and 5,000 and results report
 
 ## Client configuration
 
-All shipped examples are secret-free and use two server entries. Replace the
-Python command placeholder with the absolute path to the approved CPython 3.13
-host runtime. Never add a PLAXIS password to version control, command-line
-arguments, logs, or a profile file.
+All shipped examples are secret-free and use two server entries, one per role.
+Replace the command with wherever `plaxis-mcp.exe` lives on the machine, or with
+`uvx plaxis-mcp` for a PyPI install. Nothing else needs editing: `--role` finds
+the shared profiles by itself. Never add a PLAXIS password to version control,
+command-line arguments, logs, or a profile file.
 
 | Client | Example |
 | --- | --- |

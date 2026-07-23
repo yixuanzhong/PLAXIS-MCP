@@ -1,30 +1,25 @@
 {
   "_comment": [
     "VS Code .vscode/mcp.json (servers, not mcpServers). Replace <YOU> with the",
-    "Windows account that ran the PLAXIS-MCP installer.",
-    "The password prompt that used to live here is gone on purpose: the profile",
-    "names a Windows Credential Manager target, and `serve --config` refuses to",
-    "start if any PLAXIS_* endpoint environment override is set.",
+    "Windows account that ran the PLAXIS-MCP installer, or use `uvx` with args",
+    "[\"plaxis-mcp\", \"serve\", \"--role\", \"input\"] for a PyPI install.",
+    "Run `plaxis-mcp.exe setup` once per machine before first use.",
+    "The password prompt that used to live here is gone on purpose: --role reads",
+    "the generated profile, which names a Windows Credential Manager target, and",
+    "`serve` refuses to start if any PLAXIS_* endpoint environment override is",
+    "set.",
     "Use Default Approvals -- not Bypass, not Autopilot."
   ],
   "servers": {
     "plaxisInput": {
       "type": "stdio",
       "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
-      "args": [
-        "serve",
-        "--config",
-        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\input.toml"
-      ]
+      "args": ["serve", "--role", "input"]
     },
     "plaxisOutput": {
       "type": "stdio",
       "command": "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe",
-      "args": [
-        "serve",
-        "--config",
-        "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\output.toml"
-      ]
+      "args": ["serve", "--role", "output"]
     }
   }
 }

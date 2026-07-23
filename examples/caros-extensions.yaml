@@ -1,16 +1,16 @@
-# Add under the `extensions` key in Caros config.yaml. Replace <YOU> with the
-# Windows account that ran the PLAXIS-MCP installer.
+# Caros 0.3.1 and later BUNDLE these two extensions, disabled by default --
+# enable them in Settings -> Extensions after running setup once. This file is
+# for older Caros builds and for a hand-maintained config.yaml; add it under
+# the `extensions` key and replace <YOU> with the Windows account that ran the
+# PLAXIS-MCP installer.
 #
-# Both entries launch the same signed executable; the profile decides the role,
-# the endpoint, and which installation's password is read from Windows
-# Credential Manager. No password appears here and no PLAXIS_* variable is set --
-# `serve --config` refuses to start if any PLAXIS endpoint environment override
-# is present.
+# Both entries launch the same signed executable; --role decides the role, the
+# endpoint, and which installation's password is read from Windows Credential
+# Manager. No password appears here and no PLAXIS_* variable is set -- `serve`
+# refuses to start if any PLAXIS endpoint environment override is present.
 #
-# Generate the profiles and store the passwords first:
-#   plaxis-mcp.exe profiles --output-dir "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles"
-#   plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\input.toml"
-#   plaxis-mcp.exe credentials set --profile "$env:LOCALAPPDATA\Caros\PLAXIS-MCP\profiles\output.toml"
+# Provision the machine first. This is once per machine, not once per client:
+#   plaxis-mcp.exe setup
 #
 # Set GOOSE_MODE=smart_approve for the Caros process itself; it is not an
 # extension variable. Every mutator below must stay on Ask Before. Client
@@ -25,8 +25,8 @@ extensions:
     cmd: 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\plaxis-mcp.exe'
     args:
       - serve
-      - --config
-      - 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\profiles\input.toml'
+      - --role
+      - input
     timeout: 300
     available_tools:
       - connect
@@ -69,8 +69,8 @@ extensions:
     cmd: 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\plaxis-mcp.exe'
     args:
       - serve
-      - --config
-      - 'C:\Users\<YOU>\AppData\Local\Caros\PLAXIS-MCP\profiles\output.toml'
+      - --role
+      - output
     timeout: 300
     available_tools:
       - connect

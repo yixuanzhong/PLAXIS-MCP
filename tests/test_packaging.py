@@ -34,11 +34,15 @@ class PackagingContractTests(unittest.TestCase):
         for name in example_names:
             content = (examples / name).read_text(encoding="utf-8")
             # Every client launches the packaged executable against a generated
-            # profile. Endpoint configuration must not travel through the agent
-            # config at all -- `serve --config` rejects those overrides.
+            # profile, named either by role or by path. Endpoint configuration
+            # must not travel through the agent config at all -- `serve` rejects
+            # those overrides.
             self.assertIn("plaxis-mcp.exe", content)
             self.assertIn("serve", content)
-            self.assertIn("--config", content)
+            self.assertTrue(
+                "--role" in content or "--config" in content,
+                "%s must select a generated profile" % name,
+            )
             self.assertNotIn("plaxis_mcp.server", content)
             self.assertNotIn("host.docker.internal", content)
             for forbidden in ("PLAXIS_ROLE", "PLAXIS_BUNDLE_PYTHON", "PLAXIS_INPUT_PASSWORD", "PLAXIS_OUTPUT_PASSWORD", "PLAXIS_PASSWORD"):
