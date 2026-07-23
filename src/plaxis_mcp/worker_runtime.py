@@ -24,7 +24,7 @@ INPUT_OPERATIONS = COMMON_OPERATIONS + (
     "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer",
     "create_material", "assign_material", "create_structural_element",
 )
-OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results")
+OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results", "get_single_result")
 ROLE_OPERATION_ALLOWLISTS = {"input": INPUT_OPERATIONS, "output": OUTPUT_OPERATIONS}
 ROLE_TOOL_ALLOWLISTS = {
     "input": ("connect", "disconnect") + INPUT_OPERATIONS,
@@ -603,6 +603,7 @@ class WorkerRuntime(object):
             "create_structural_element": lambda server, global_object, params: self._create_structural_element(global_object, params),
             "list_result_types": lambda server, global_object, params: self._list_result_types(global_object, params),
             "get_results": lambda server, global_object, params: self._get_results(global_object, params),
+            "get_single_result": lambda server, global_object, params: self._get_single_result(global_object, params),
         }
         for name, handler in handlers.items():
             self._dispatcher.register(name, handler, replace=False)
@@ -1119,6 +1120,54 @@ class WorkerRuntime(object):
             "has_more": has_more,
             "next_offset": offset + returned_count if has_more else None,
             "results": serialized,
+        }
+
+    def _get_single_result(self, global_object, params):
+        # commands_getsingleresult.html has six signatures: by named
+        # CurvePoint, by (x, y) coordinate, each with an optional trailing
+        # smoothing Boolean -- those four are implemented here. The remaining
+        # two (a directional vector for smoothing, and an updated-mesh-
+        # geometry Boolean) are not; use get_results for those cases.
+        phase = resolve_phase(global_object, params.get("phase"))
+        result_type_path = self._required_string(params, "result_type_path")
+        result_type = resolve_path(global_object, result_type_path)
+        point = params.get("point")
+        coords = params.get("coords")
+        if (point is None) == (coords is None):
+            raise WorkerError("INVALID_ARGUMENT", "Specify exactly one of point or coords.")
+        smoothing = self._optional_bool(params, "smoothing")
+
+        if point is not None:
+            target = resolve_reference(global_object, point, "point")
+            call_args = (phase, result_type, target)
+        else:
+            if (
+                not isinstance(coords, list)
+                or len(coords) != 2
+                or not all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in coords)
+            ):
+                raise WorkerError("INVALID_ARGUMENT", "coords must be a [x, y] pair of numbers.")
+            call_args = (phase, result_type, coords[0], coords[1])
+        if smoothing is not None:
+            call_args = call_args + (smoothing,)
+
+        try:
+            getsingleresult = getattr(global_object, "getsingleresult")
+        except Exception:
+            raise WorkerError("WRONG_ROLE", "Connected PLAXIS endpoint does not expose Output results.")
+        if not callable(getsingleresult):
+            raise WorkerError("WRONG_ROLE", "Connected PLAXIS endpoint does not expose Output results.")
+        try:
+            result = getsingleresult(*call_args)
+        except Exception:
+            raise WorkerError("PLAXIS_ERROR", "PLAXIS could not retrieve the requested result.")
+        return {
+            "phase": describe_value(phase),
+            "result_type_path": result_type_path,
+            "point": point,
+            "coords": coords,
+            "smoothing": smoothing,
+            "result": describe_value(result),
         }
 
     def _handshake(self):

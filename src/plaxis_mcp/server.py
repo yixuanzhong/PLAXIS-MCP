@@ -866,6 +866,28 @@ def create_server(
                 limit=limit,
             )
 
+        @server.tool(annotations=_READ, structured_output=True)
+        def get_single_result(
+            phase: StrictInt | StrictStr,
+            result_type_path: Annotated[StrictStr, Field(min_length=1)],
+            point: Annotated[StrictStr, Field(min_length=1)] | None = None,
+            coords: Annotated[list[StrictFloat], Field(min_length=2, max_length=2)] | None = None,
+            smoothing: StrictBool | None = None,
+        ) -> dict[str, Any]:
+            """Fetch one result value at a named point or an (x, y) coordinate.
+
+            Specify exactly one of point (an existing curve point's path) or
+            coords ([x, y]). Only these two lookup forms are implemented;
+            directional smoothing and updated-mesh-geometry coordinate lookup
+            are not -- use get_results for those cases.
+            """
+
+            return _invoke(
+                session, "get_single_result",
+                phase=phase, result_type_path=result_type_path,
+                point=point, coords=coords, smoothing=smoothing,
+            )
+
     _lock_input_schemas(server)
     _install_bridge_error_handlers(server, session, config)
     return server

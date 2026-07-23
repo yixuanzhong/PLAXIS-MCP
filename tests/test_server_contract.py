@@ -128,6 +128,7 @@ class ServerContractTests(unittest.TestCase):
                 "list_materials",
                 "list_result_types",
                 "get_results",
+                "get_single_result",
             },
         )
         self.assertTrue(input_tools["inspect"].annotations.readOnlyHint)

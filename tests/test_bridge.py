@@ -289,6 +289,10 @@ class FakeRoot:
         self.last_getresults_call = (phase, result_type, fem_type, smoothing)
         return list(range(250))
 
+    def getsingleresult(self, *args):
+        self.last_getsingleresult_call = args
+        return 1.23
+
     def phase(self, after_phase):
         self.last_phase_call = ("phase", after_phase)
         return FakePhase("NewPhase")
@@ -709,7 +713,7 @@ class WorkerRuntimeTests(unittest.TestCase):
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 31)
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 10)
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 11)
 
         def factory(**kwargs):
             return FakeServer(), FakeRoot()
@@ -818,6 +822,57 @@ class WorkerRuntimeTests(unittest.TestCase):
             roots[-1].last_getresults_call,
             (roots[-1].Phases[0], roots[-1].ResultTypes.Soil.Utot, "node", None),
         )
+
+    def test_get_single_result_by_point_or_coords_not_both_or_neither(self) -> None:
+        roots: list = []
+
+        def factory(**kwargs):
+            root = FakeRoot()
+            roots.append(root)
+            return FakeServer(), root
+
+        output = WorkerRuntime(role="output", new_server_factory=factory)
+        output.handle_request(
+            {"protocol": 1, "id": 1, "operation": "connect", "params": {"host": "127.0.0.1", "port": 10002, "password": "secret"}}
+        )
+
+        neither = output.handle_request(
+            {"protocol": 1, "id": 2, "operation": "call", "params": {"method": "get_single_result", "params": {
+                "phase": 0, "result_type_path": "ResultTypes.Soil.Utot",
+            }}}
+        )
+        self.assertFalse(neither["ok"])
+        self.assertEqual(neither["error"]["code"], "INVALID_ARGUMENT")
+
+        both = output.handle_request(
+            {"protocol": 1, "id": 3, "operation": "call", "params": {"method": "get_single_result", "params": {
+                "phase": 0, "result_type_path": "ResultTypes.Soil.Utot", "point": "Phases[0]", "coords": [1, 2],
+            }}}
+        )
+        self.assertFalse(both["ok"])
+        self.assertEqual(both["error"]["code"], "INVALID_ARGUMENT")
+
+        by_point = output.handle_request(
+            {"protocol": 1, "id": 4, "operation": "call", "params": {"method": "get_single_result", "params": {
+                "phase": 0, "result_type_path": "ResultTypes.Soil.Utot", "point": "Phases[1]", "smoothing": True,
+            }}}
+        )
+        self.assertTrue(by_point["ok"], by_point)
+        self.assertEqual(by_point["result"]["result"], 1.23)
+        phase, result_type, point, smoothing = roots[-1].last_getsingleresult_call
+        self.assertIs(point, roots[-1].Phases[1])
+        self.assertNotIsInstance(point, str)
+        self.assertTrue(smoothing)
+
+        by_coords = output.handle_request(
+            {"protocol": 1, "id": 5, "operation": "call", "params": {"method": "get_single_result", "params": {
+                "phase": 0, "result_type_path": "ResultTypes.Soil.Utot", "coords": [3.0, 5.0],
+            }}}
+        )
+        self.assertTrue(by_coords["ok"], by_coords)
+        # Omitted smoothing means no trailing argument at all, matching
+        # get_results's same "don't forward an explicit None" rule.
+        self.assertEqual(roots[-1].last_getsingleresult_call, (roots[-1].Phases[0], roots[-1].ResultTypes.Soil.Utot, 3.0, 5.0))
 
     def test_create_phase_dispatches_to_phase_or_insertphase_by_position(self) -> None:
         root = FakeRoot()
