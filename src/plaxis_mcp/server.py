@@ -818,6 +818,20 @@ def create_server(
 
             return _invoke(session, "assign_material", paths=paths, material=material)
 
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_structural_element(
+            kind: Literal["plate", "geogrid", "embedded_beam", "n2n_anchor"],
+            paths: Annotated[list[StrictStr], Field(min_length=1)],
+        ) -> dict[str, Any]:
+            """Add a structural element feature to one or more existing lines.
+
+            Only the add-to-existing-line form is implemented; creating a new
+            line inline, or element-specific extra overloads, are not. Create
+            the line first with create_line.
+            """
+
+            return _invoke(session, "create_structural_element", kind=kind, paths=paths)
+
     else:
 
         @server.tool(annotations=_READ, structured_output=True)

@@ -381,6 +381,22 @@ class FakeRoot:
         self.last_setmaterial_call = (features, material)
         return True
 
+    def plate(self, *lines):
+        self.last_structural_call = ("plate", lines)
+        return True
+
+    def geogrid(self, *lines):
+        self.last_structural_call = ("geogrid", lines)
+        return True
+
+    def embeddedbeam(self, *lines):
+        self.last_structural_call = ("embeddedbeam", lines)
+        return True
+
+    def n2nanchor(self, *lines):
+        self.last_structural_call = ("n2nanchor", lines)
+        return True
+
 
 class BridgeTests(unittest.TestCase):
     def make_session(self, password: str = "top-secret") -> BridgeSession:
@@ -496,7 +512,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         handshake = runtime.handle_request({"protocol": 1, "id": 1, "operation": "handshake", "params": {}})
         self.assertTrue(handshake["ok"])
         self.assertEqual(handshake["result"]["role"], "input")
-        self.assertEqual(len(handshake["result"]["operations"]), 28)
+        self.assertEqual(len(handshake["result"]["operations"]), 29)
 
         connected = runtime.handle_request(
             {
@@ -692,7 +708,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(not_connected["error"]["code"], "NOT_CONNECTED")
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 30)
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 31)
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 10)
 
         def factory(**kwargs):
@@ -995,6 +1011,28 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertIs(material, root.Phases[1])
         self.assertNotIsInstance(features[0], str)
         self.assertNotIsInstance(material, str)
+
+    def test_create_structural_element_dispatches_by_kind_with_resolved_lines(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        for kind, command_name in (
+            ("plate", "plate"), ("geogrid", "geogrid"),
+            ("embedded_beam", "embeddedbeam"), ("n2n_anchor", "n2nanchor"),
+        ):
+            result = self._call(runtime, "create_structural_element", kind=kind, paths=["Phases[0]"])
+            self.assertTrue(result["ok"], result)
+            called_command, lines = root.last_structural_call
+            self.assertEqual(called_command, command_name)
+            self.assertEqual(lines, (root.Phases[0],))
+            self.assertNotIsInstance(lines[0], str)
+
+    def test_create_structural_element_rejects_unknown_kind(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(runtime, "create_structural_element", kind="not-a-real-kind", paths=["Phases[0]"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "INVALID_ARGUMENT")
 
     def test_private_path_or_method_is_rejected(self) -> None:
         def factory(**kwargs):

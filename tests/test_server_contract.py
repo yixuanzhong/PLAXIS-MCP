@@ -112,6 +112,7 @@ class ServerContractTests(unittest.TestCase):
                 "create_soillayer",
                 "create_material",
                 "assign_material",
+                "create_structural_element",
             },
         )
         self.assertEqual(

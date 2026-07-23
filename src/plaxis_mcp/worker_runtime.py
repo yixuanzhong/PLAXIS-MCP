@@ -22,7 +22,7 @@ INPUT_OPERATIONS = COMMON_OPERATIONS + (
     "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property",
     "set_mode", "generate_mesh",
     "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer",
-    "create_material", "assign_material",
+    "create_material", "assign_material", "create_structural_element",
 )
 OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results")
 ROLE_OPERATION_ALLOWLISTS = {"input": INPUT_OPERATIONS, "output": OUTPUT_OPERATIONS}
@@ -600,6 +600,7 @@ class WorkerRuntime(object):
             "create_soillayer": lambda server, global_object, params: self._create_soillayer(global_object, params),
             "create_material": lambda server, global_object, params: self._create_material(global_object, params),
             "assign_material": lambda server, global_object, params: self._assign_material(global_object, params),
+            "create_structural_element": lambda server, global_object, params: self._create_structural_element(global_object, params),
             "list_result_types": lambda server, global_object, params: self._list_result_types(global_object, params),
             "get_results": lambda server, global_object, params: self._get_results(global_object, params),
         }
@@ -960,6 +961,31 @@ class WorkerRuntime(object):
         material = resolve_reference(global_object, params.get("material"), "material")
         result = call_plaxis_command(global_object, "setmaterial", features, material)
         return {"paths": params.get("paths"), "material": params.get("material"), "result": describe_value(result)}
+
+    # -- Structural elements (WP-F) --------------------------------------------
+    #
+    # plate/geogrid/embeddedbeam/n2nanchor all share an identical first
+    # signature in the command reference: "adds <element> features to one or
+    # more existing lines" (<{1,...}: <Line'|Polycurve'>>'), confirmed by
+    # reading each command's first signature individually rather than
+    # assuming the pattern held after the first match. Only that signature is
+    # implemented -- creating a new line inline, or the element-specific
+    # extra overloads (e.g. n2nanchor's material/prestress-in-one-call form),
+    # are not. Build the element on an existing line (via create_line) first.
+
+    _STRUCTURAL_ELEMENT_COMMANDS = {
+        "plate": "plate",
+        "geogrid": "geogrid",
+        "embedded_beam": "embeddedbeam",
+        "n2n_anchor": "n2nanchor",
+    }
+
+    def _create_structural_element(self, global_object, params):
+        kind = self._choice_string(params, "kind", self._STRUCTURAL_ELEMENT_COMMANDS.keys(), None)
+        lines = resolve_reference_list(global_object, params.get("paths"), "paths")
+        command_name = self._STRUCTURAL_ELEMENT_COMMANDS[kind]
+        result = call_plaxis_command(global_object, command_name, *lines)
+        return {"kind": kind, "paths": params.get("paths"), "result": describe_value(result)}
 
     @staticmethod
     def _list_phases(global_object):
