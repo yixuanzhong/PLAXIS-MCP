@@ -14,7 +14,7 @@ command = "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe"
 args = ["serve", "--config", "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\input.toml"]
 startup_timeout_sec = 30
 tool_timeout_sec = 300
-enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project"]
+enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "set_property", "call_method", "new_project", "open_project", "close_project", "recover_project", "save_project", "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property", "set_mode", "generate_mesh", "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer", "create_material", "assign_material", "create_structural_element"]
 default_tools_approval_mode = "writes"
 
 [mcp_servers.plaxis_output]
@@ -22,5 +22,5 @@ command = "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\plaxis-mcp.exe"
 args = ["serve", "--config", "C:\\Users\\<YOU>\\AppData\\Local\\Caros\\PLAXIS-MCP\\profiles\\output.toml"]
 startup_timeout_sec = 30
 tool_timeout_sec = 300
-enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "list_result_types", "get_results"]
+enabled_tools = ["connect", "disconnect", "connection_status", "list_members", "inspect", "project_info", "list_phases", "list_materials", "list_result_types", "get_results", "get_single_result"]
 default_tools_approval_mode = "writes"

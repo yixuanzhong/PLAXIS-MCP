@@ -232,6 +232,37 @@ class ServerContractTests(unittest.TestCase):
         self.assertEqual(result.structuredContent["code"], "WRONG_ROLE")
         self.assertEqual(result.structuredContent["state"], "connected")
 
+    def test_error_handler_binds_each_tools_own_function_not_a_shared_closure(self):
+        """_install_bridge_error_handlers wraps every tool's fn in the same
+        loop. A late-binding closure bug there (capturing the loop variable
+        itself rather than its value at each iteration) would make every
+        wrapped tool call whichever tool was defined last -- worth a direct
+        check now that the Input role alone wraps 31 tools, not a handful."""
+
+        class SelectiveFailureSession:
+            def status(self):
+                return {"state": "connected", "connected": True}
+
+            def invoke(self, operation, **params):
+                # Every mutator this session receives fails with an error
+                # naming the operation that was actually called.
+                raise WorkerOperationError("PLAXIS_ERROR", "failed:" + operation, state="connected")
+
+        server = create_server(
+            ServerConfig(role=PlaxisRole.INPUT),
+            session_factory=SelectiveFailureSession,
+        )
+
+        activate_result = asyncio.run(
+            server.call_tool("activate", {"paths": ["Line_1"], "phases": ["Phase_1"]})
+        )
+        calculate_result = asyncio.run(server.call_tool("calculate", {}))
+
+        self.assertTrue(activate_result.isError)
+        self.assertEqual(activate_result.structuredContent["message"], "failed:activate")
+        self.assertTrue(calculate_result.isError)
+        self.assertEqual(calculate_result.structuredContent["message"], "failed:calculate")
+
     def test_generated_profile_uses_credential_store_not_environment(self):
         installation_root = Path(sys.executable).parent
         profile = EndpointProfile(

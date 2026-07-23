@@ -44,6 +44,22 @@ extensions:
       - close_project
       - recover_project
       - save_project
+      - create_phase
+      - set_current_phase
+      - activate
+      - deactivate
+      - calculate
+      - set_phase_property
+      - set_mode
+      - generate_mesh
+      - create_point
+      - create_line
+      - create_polygon
+      - create_borehole
+      - create_soillayer
+      - create_material
+      - assign_material
+      - create_structural_element
 
   plaxis_output:
     enabled: true
@@ -67,3 +83,4 @@ extensions:
       - list_materials
       - list_result_types
       - get_results
+      - get_single_result
