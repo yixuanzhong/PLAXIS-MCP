@@ -357,6 +357,30 @@ class FakeRoot:
         self.last_soillayer_call = height
         return True
 
+    def soilmat(self, *args):
+        self.last_material_call = ("soilmat", args)
+        return True
+
+    def platemat(self, *args):
+        self.last_material_call = ("platemat", args)
+        return True
+
+    def geogridmat(self, *args):
+        self.last_material_call = ("geogridmat", args)
+        return True
+
+    def anchormat(self, *args):
+        self.last_material_call = ("anchormat", args)
+        return True
+
+    def embeddedbeammat(self, *args):
+        self.last_material_call = ("embeddedbeammat", args)
+        return True
+
+    def setmaterial(self, features, material):
+        self.last_setmaterial_call = (features, material)
+        return True
+
 
 class BridgeTests(unittest.TestCase):
     def make_session(self, password: str = "top-secret") -> BridgeSession:
@@ -472,7 +496,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         handshake = runtime.handle_request({"protocol": 1, "id": 1, "operation": "handshake", "params": {}})
         self.assertTrue(handshake["ok"])
         self.assertEqual(handshake["result"]["role"], "input")
-        self.assertEqual(len(handshake["result"]["operations"]), 26)
+        self.assertEqual(len(handshake["result"]["operations"]), 28)
 
         connected = runtime.handle_request(
             {
@@ -668,7 +692,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(not_connected["error"]["code"], "NOT_CONNECTED")
 
     def test_role_allowlists_and_paginated_output_results(self) -> None:
-        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 28)
+        self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["input"]), 30)
         self.assertEqual(len(ROLE_TOOL_ALLOWLISTS["output"]), 10)
 
         def factory(**kwargs):
@@ -929,6 +953,48 @@ class WorkerRuntimeTests(unittest.TestCase):
         soil = self._call(runtime, "create_soillayer", height=3)
         self.assertTrue(soil["ok"], soil)
         self.assertEqual(root.last_soillayer_call, 3)
+
+    def test_create_material_dispatches_by_kind_and_flattens_properties(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        placeholder = self._call(runtime, "create_material", kind="soil")
+        self.assertTrue(placeholder["ok"], placeholder)
+        self.assertEqual(root.last_material_call, ("soilmat", ()))
+
+        full = self._call(
+            runtime, "create_material", kind="plate",
+            properties={"Identification": "Footing", "MaterialType": "Elastic"},
+        )
+        self.assertTrue(full["ok"], full)
+        command, args = root.last_material_call
+        self.assertEqual(command, "platemat")
+        # Property order from a dict is insertion order in Python 3.7+; verify
+        # the pairs are flattened correctly rather than assuming a fixed order.
+        self.assertEqual(dict(zip(args[0::2], args[1::2])), {"Identification": "Footing", "MaterialType": "Elastic"})
+
+    def test_create_material_rejects_empty_properties_and_unknown_kind(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+
+        empty = self._call(runtime, "create_material", kind="soil", properties={})
+        self.assertFalse(empty["ok"])
+        self.assertEqual(empty["error"]["code"], "INVALID_ARGUMENT")
+
+        unknown = self._call(runtime, "create_material", kind="not-a-real-kind")
+        self.assertFalse(unknown["ok"])
+        self.assertEqual(unknown["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_assign_material_resolves_features_and_material_not_strings(self) -> None:
+        root = FakeRoot()
+        runtime = self._input_runtime(root)
+        result = self._call(runtime, "assign_material", paths=["Phases[0]"], material="Phases[1]")
+        self.assertTrue(result["ok"], result)
+        features, material = root.last_setmaterial_call
+        self.assertEqual(features, [root.Phases[0]])
+        self.assertIs(material, root.Phases[1])
+        self.assertNotIsInstance(features[0], str)
+        self.assertNotIsInstance(material, str)
 
     def test_private_path_or_method_is_rejected(self) -> None:
         def factory(**kwargs):

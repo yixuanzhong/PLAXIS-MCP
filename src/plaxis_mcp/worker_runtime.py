@@ -22,6 +22,7 @@ INPUT_OPERATIONS = COMMON_OPERATIONS + (
     "create_phase", "set_current_phase", "activate", "deactivate", "calculate", "set_phase_property",
     "set_mode", "generate_mesh",
     "create_point", "create_line", "create_polygon", "create_borehole", "create_soillayer",
+    "create_material", "assign_material",
 )
 OUTPUT_OPERATIONS = COMMON_OPERATIONS + ("list_result_types", "get_results")
 ROLE_OPERATION_ALLOWLISTS = {"input": INPUT_OPERATIONS, "output": OUTPUT_OPERATIONS}
@@ -597,6 +598,8 @@ class WorkerRuntime(object):
             "create_polygon": lambda server, global_object, params: self._create_polygon(global_object, params),
             "create_borehole": lambda server, global_object, params: self._create_borehole(global_object, params),
             "create_soillayer": lambda server, global_object, params: self._create_soillayer(global_object, params),
+            "create_material": lambda server, global_object, params: self._create_material(global_object, params),
+            "assign_material": lambda server, global_object, params: self._assign_material(global_object, params),
             "list_result_types": lambda server, global_object, params: self._list_result_types(global_object, params),
             "get_results": lambda server, global_object, params: self._get_results(global_object, params),
         }
@@ -909,6 +912,54 @@ class WorkerRuntime(object):
         height = self._required_number(params, "height")
         result = call_plaxis_command(global_object, "soillayer", height)
         return {"height": height, "result": describe_value(result)}
+
+    # -- Materials (WP-G) ------------------------------------------------------
+    #
+    # soilmat/platemat/geogridmat/anchormat/embeddedbeammat all share one
+    # identical shape in the command reference: a zero-argument form that
+    # creates an unusable placeholder, and a free-form <PropValue{1,...}>
+    # name/value-pair form. PLAXIS material models are not individually
+    # schema'd here (10+ constitutive models, dozens of parameters each); a
+    # property dict is the right shape, matching how setproperties itself
+    # already works.
+
+    _MATERIAL_COMMANDS = {
+        "soil": "soilmat",
+        "plate": "platemat",
+        "geogrid": "geogridmat",
+        "anchor": "anchormat",
+        "embedded_beam": "embeddedbeammat",
+    }
+
+    def _create_material(self, global_object, params):
+        kind = self._choice_string(params, "kind", self._MATERIAL_COMMANDS.keys(), None)
+        properties = params.get("properties")
+        command_name = self._MATERIAL_COMMANDS[kind]
+        if properties is None:
+            result = call_plaxis_command(global_object, command_name)
+        else:
+            if not isinstance(properties, dict) or not properties:
+                raise WorkerError(
+                    "INVALID_ARGUMENT", "properties must be a non-empty object of property-value pairs."
+                )
+            args = []
+            for name, value in properties.items():
+                if not isinstance(name, str) or not name:
+                    raise WorkerError("INVALID_ARGUMENT", "Every material property name must be a non-empty string.")
+                args.append(name)
+                args.append(value)
+            result = call_plaxis_command(global_object, command_name, *args)
+        return {"kind": kind, "properties": properties, "result": describe_value(result)}
+
+    def _assign_material(self, global_object, params):
+        # setmaterial's "one or more features" signature (<{1,...}: Feature'>'
+        # Material') already covers a single feature, so the resolved list is
+        # always passed as one argument -- no need to special-case count 1
+        # against the doc's separate single-feature signature.
+        features = resolve_reference_list(global_object, params.get("paths"), "paths")
+        material = resolve_reference(global_object, params.get("material"), "material")
+        result = call_plaxis_command(global_object, "setmaterial", features, material)
+        return {"paths": params.get("paths"), "material": params.get("material"), "result": describe_value(result)}
 
     @staticmethod
     def _list_phases(global_object):

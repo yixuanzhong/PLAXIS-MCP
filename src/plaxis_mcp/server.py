@@ -794,6 +794,30 @@ def create_server(
 
             return _invoke(session, "create_soillayer", height=height)
 
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def create_material(
+            kind: Literal["soil", "plate", "geogrid", "anchor", "embedded_beam"],
+            properties: dict[str, JsonValue] | None = None,
+        ) -> dict[str, Any]:
+            """Create a material set.
+
+            Omit properties to create a placeholder material that cannot be
+            used to calculate until edited; provide a property/value map
+            (matching PLAXIS's own property names, e.g. "SoilModel",
+            "gammaUnsat") to create a usable material in one call.
+            """
+
+            return _invoke(session, "create_material", kind=kind, properties=properties)
+
+        @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
+        def assign_material(
+            paths: Annotated[list[StrictStr], Field(min_length=1)],
+            material: Annotated[StrictStr, Field(min_length=1)],
+        ) -> dict[str, Any]:
+            """Assign a material to one or more features."""
+
+            return _invoke(session, "assign_material", paths=paths, material=material)
+
     else:
 
         @server.tool(annotations=_READ, structured_output=True)

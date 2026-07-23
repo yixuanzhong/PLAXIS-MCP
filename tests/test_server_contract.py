@@ -110,6 +110,8 @@ class ServerContractTests(unittest.TestCase):
                 "create_polygon",
                 "create_borehole",
                 "create_soillayer",
+                "create_material",
+                "assign_material",
             },
         )
         self.assertEqual(
