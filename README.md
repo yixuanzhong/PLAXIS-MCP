@@ -30,13 +30,13 @@ exposed as tools, over a hardened Windows-local stdio server.
 | | |
 | --- | --- |
 | **One-shot machine setup** | `plaxis-mcp setup` discovers the PLAXIS installation, writes both role profiles, and stores each role password in Windows Credential Manager — with hidden prompts, no password argument. |
-| **Shared profile store** | Every client on the machine reads the same profiles. Caros, Claude Code, Codex, Cursor and VS Code all bind to one installation and one credential set. |
+| **Shared profile store** | Every client on the machine reads the same profiles. Claude Code, Codex, Cursor and VS Code all bind to one installation and one credential set. |
 | **`serve --role`** | No per-client config surgery. `--role input` / `--role output` resolves its own profile. |
 | **Mode-aware operations** | `generate_mesh`, `create_phase` and `calculate` enter the PLAXIS mode they need, so a workflow never has to interleave `set_mode` calls. |
 | **Listed on the MCP Registry** | Published as `io.github.yixuanzhong/plaxis-mcp`, installable with `uvx`. |
 
-Client-neutral by design: Caros, Codex, Claude Code, Cursor, VS Code/Copilot and any
-other conforming local stdio MCP client connect to the same **unprefixed** server tools.
+Client-neutral by design: Codex, Claude Code, Cursor, VS Code/Copilot and any other
+conforming local stdio MCP client connect to the same **unprefixed** server tools.
 
 ---
 
@@ -141,7 +141,6 @@ Nothing else needs editing — `--role` finds the shared profiles by itself.
 
 | Client | Example | Credentials & approvals |
 | --- | --- | --- |
-| **Caros** | [`caros-extensions.yaml`](examples/caros-extensions.yaml) | Password in the keyring-backed `env_keys` entry; run with `GOOSE_MODE=smart_approve`; keep every mutator at Ask Before. |
 | **Codex** | [`codex-config.toml`](examples/codex-config.toml) | `env_vars` forwards the locally stored password; `default_tools_approval_mode = "writes"`. |
 | **Claude Code** | [`claude-code-mcp.json`](examples/claude-code-mcp.json) | Expand only a user-level environment variable in `.mcp.json`; retain server trust and tool approval prompts. |
 | **Cursor** | [`cursor-mcp.json`](examples/cursor-mcp.json) | Role password in the user environment at launch; keep Auto-run **off**. |
@@ -170,8 +169,9 @@ The generic [`mcp-client-config.json`](examples/mcp-client-config.json) is a min
   mutators. Do not set an Always Allow-style rule for `call_method`, `open_project` or
   `save_project`: client approval is generally tool-wide, not argument-scoped.
 - **Mutation is not undoable.** Absolute local and UNC `.p2dx` paths reachable by PLAXIS are
-  allowed only after user approval. Client approvals and Caros checkpoints cannot restore
-  in-memory PLAXIS state — use disposable projects and backups for all mutation testing.
+  allowed only after user approval. Client approvals and client-side checkpointing cannot
+  restore in-memory PLAXIS state — use disposable projects and backups for all mutation
+  testing.
 
 ---
 
