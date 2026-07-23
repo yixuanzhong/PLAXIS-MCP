@@ -15,18 +15,17 @@ authors = [
 dependencies = [
   "mcp[cli]==1.26.0",
 ]
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: Microsoft :: Windows",
+]
 
 [project.optional-dependencies]
 # Packaging is intentionally an opt-in host-side dependency. Nothing in this
 # project installs into a PLAXIS-owned Python distribution.
 package = [
   "pyinstaller==6.16.0",
-]
-
-classifiers = [
-  "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.13",
-  "Operating System :: Microsoft :: Windows",
 ]
 
 [project.urls]
