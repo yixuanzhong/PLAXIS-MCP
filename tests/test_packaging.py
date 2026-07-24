@@ -10,14 +10,14 @@ class PackagingContractTests(unittest.TestCase):
     def test_host_runtime_metadata_is_pinned(self):
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertIn('version = "0.3.1"', metadata)
+        self.assertIn('version = "0.3.2"', metadata)
         self.assertIn('requires-python = ">=3.13,<3.14"', metadata)
         self.assertIn('"mcp[cli]==1.26.0"', metadata)
         self.assertNotIn("plxscripting", metadata.lower())
         package_init = (ROOT / "src" / "plaxis_mcp" / "__init__.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('__version__ = "0.3.1"', package_init)
+        self.assertIn('__version__ = "0.3.2"', package_init)
 
     def test_client_examples_are_present_and_secret_free(self):
         example_names = {

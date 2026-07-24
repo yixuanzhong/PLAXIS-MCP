@@ -62,7 +62,7 @@ async def _exercise_protocol(protocol_version):
 
                 assert initialized.protocolVersion == protocol_version
                 assert initialized.serverInfo.name == "plaxis-mcp"
-                assert initialized.serverInfo.version == "0.3.1"
+                assert initialized.serverInfo.version == "0.3.2"
                 assert {tool.name for tool in tools.tools} >= {
                     "connection_status",
                     "get_results",
