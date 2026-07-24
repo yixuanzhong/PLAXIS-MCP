@@ -31,6 +31,80 @@ jobs:
           PYTHONPATH: ../src
         run: python -m unittest discover -s . -t .
 
+  frozen-binary:
+    # The unit suite asserts the tool surface from source; this asserts the
+    # PyInstaller bundle Caros actually launches still carries it. Only the
+    # frozen build exercises the hidden imports, the worker.py staged under
+    # _internal/, and the sys._MEIPASS path resolution -- a dropped import or an
+    # unstaged worker passes every source-mode test and breaks only here. It
+    # cannot reach PLAXIS in CI, but discovery (initialize + tools/list) needs
+    # no connection, so a wrong tool count is still caught.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install build dependencies with pinned hashes
+        run: python -m pip install --require-hashes --requirement requirements-build.lock
+      - name: Verify the build lock matches the installed set
+        run: python scripts/verify_dependencies.py --requirements requirements-build.lock
+      - name: Build the one-directory bundle
+        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build/pyinstaller packaging/plaxis-mcp.spec
+      - name: The version the exe reports matches the package
+        shell: python
+        run: |
+          import pathlib, subprocess, sys, tomllib
+          # A resolved absolute path -- CreateProcess does not reliably accept a
+          # relative forward-slash exe path on Windows.
+          exe = str(pathlib.Path("dist/plaxis-mcp/plaxis-mcp.exe").resolve())
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          out = subprocess.run([exe, "--version"], capture_output=True, text=True, check=True).stdout.strip()
+          if out != "plaxis-mcp %s" % version:
+              sys.exit("exe reported %r, expected plaxis-mcp %s" % (out, version))
+          print(out)
+      - name: The worker source is staged into the bundle
+        shell: python
+        run: |
+          import pathlib, sys
+          root = pathlib.Path("dist/plaxis-mcp/_internal/worker")
+          missing = [n for n in ("worker.py", "worker_runtime.py") if not (root / n).is_file()]
+          if missing:
+              sys.exit("worker not staged: %s" % missing)
+          print("worker staged:", sorted(p.name for p in root.iterdir()))
+      - name: No Bentley/Seequent/plxscripting paths shipped
+        run: python scripts/write_artifact_manifest.py --artifact-root dist/plaxis-mcp
+      - name: The frozen exe advertises the full tool surface
+        # Env mode needs no generated profile and never starts the worker (no
+        # connect), so the bundle-python path only has to be a real file.
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess, sys
+          exe = str(pathlib.Path("dist/plaxis-mcp/plaxis-mcp.exe").resolve())
+          env = dict(os.environ)
+          env["PLAXIS_ROLE"] = "input"
+          env["PLAXIS_INPUT_BUNDLE_PYTHON"] = r"C:\Windows\System32\cmd.exe"
+          proc = subprocess.Popen([exe], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+          def send(msg): proc.stdin.write(json.dumps(msg) + "\n"); proc.stdin.flush()
+          try:
+              send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "ci", "version": "1"}}})
+              proc.stdout.readline()
+              send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+              send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+              names = sorted(t["name"] for t in json.loads(proc.stdout.readline())["result"]["tools"])
+          finally:
+              proc.terminate()
+          expected = 34
+          if len(names) != expected:
+              sys.exit("frozen exe advertised %d tools, expected %d: %s" % (len(names), expected, names))
+          for required in ("list_objects", "model_state", "view_results"):
+              if required not in names:
+                  sys.exit("frozen exe is missing %s" % required)
+          print("frozen exe advertises %d tools" % len(names))
+
   versions-agree:
     runs-on: ubuntu-latest
     steps:

@@ -2080,8 +2080,32 @@ class WorkerRuntime(object):
             state["unavailable_members"] = missing
         return state
 
-    def _unassigned_materials(self, global_object):
-        unassigned, scanned, truncated = [], 0, False
+    # PLAXIS's own token for a material whose identification was never set --
+    # what a zero-argument create_material leaves behind. The closed calculate
+    # blocker was exactly this: `Invalid material "<NoName> [PlateMat_2]"`, a
+    # placeholder assigned to a plate. PLAXIS flags such a material by this
+    # identification, so keying on it matches PLAXIS's own semantics.
+    _PLACEHOLDER_IDENTIFICATION = "<NoName>"
+
+    @staticmethod
+    def _feature_entry(collection, item):
+        entry = {"collection": collection, "name": describe_value(read_member_value(item, "Name"))}
+        path = object_path(item)
+        if path is not None:
+            entry["path"] = path
+        return entry
+
+    def _material_readiness(self, global_object):
+        """Scan material-bearing features for what would stop a calculate.
+
+        Two distinct findings, because a caller acts differently on each: a
+        feature with no material at all, and a feature whose material was never
+        configured (identification still the placeholder token). The second is
+        the failure that killed the earlier calculate, and it is invisible to
+        an unassigned-materials check because the material is present.
+        """
+
+        unassigned, placeholder, scanned, truncated = [], [], 0, False
         for collection in self._MATERIAL_BEARING_COLLECTIONS:
             try:
                 items = list(getattr(global_object, collection))
@@ -2093,16 +2117,24 @@ class WorkerRuntime(object):
                     break
                 scanned += 1
                 present, material = read_member(item, "Material")
-                if present and material is not None:
+                if not present or material is None:
+                    unassigned.append(self._feature_entry(collection, item))
                     continue
-                entry = {"collection": collection, "name": describe_value(read_member_value(item, "Name"))}
-                path = object_path(item)
-                if path is not None:
-                    entry["path"] = path
-                unassigned.append(entry)
+                if read_member_value(material, "Identification") == self._PLACEHOLDER_IDENTIFICATION:
+                    entry = self._feature_entry(collection, item)
+                    material_path = object_path(material)
+                    if material_path is not None:
+                        entry["material"] = material_path
+                    placeholder.append(entry)
             if truncated:
                 break
-        result = {"scanned": scanned, "count": len(unassigned), "features": unassigned}
+        result = {
+            "scanned": scanned,
+            "count": len(unassigned),
+            "features": unassigned,
+            "placeholder_count": len(placeholder),
+            "placeholder_features": placeholder,
+        }
         if truncated:
             result["scan_truncated"] = True
             result["scan_limit"] = self._MODEL_STATE_SCAN_LIMIT
@@ -2119,7 +2151,7 @@ class WorkerRuntime(object):
 
         mesh = self._mesh_state(global_object)
         phases = self._phase_outcomes(global_object)
-        materials = self._unassigned_materials(global_object)
+        materials = self._material_readiness(global_object)
         blocking, unknown, caveats = [], [], []
 
         if not mesh.get("available"):
@@ -2173,6 +2205,26 @@ class WorkerRuntime(object):
                     ", ".join(
                         str(feature.get("path") or feature.get("name"))
                         for feature in materials["features"][:10]
+                    ),
+                )
+            )
+        if materials["placeholder_count"]:
+            # PLAXIS rejected exactly this at calculate ("Invalid material
+            # <NoName> ..."), so it is a real blocker, not a caveat. The
+            # material is named so the fix -- configure it or reassign -- is one
+            # step, instead of a calculate that fails without saying why.
+            blocking.append(
+                "%d feature(s) reference a material that was never configured (its identification "
+                "is still PLAXIS's placeholder); PLAXIS rejects an unconfigured material at "
+                "calculate. Set its properties or assign a configured material: %s."
+                % (
+                    materials["placeholder_count"],
+                    ", ".join(
+                        "%s->%s" % (
+                            feature.get("path") or feature.get("name"),
+                            feature.get("material", "?"),
+                        )
+                        for feature in materials["placeholder_features"][:10]
                     ),
                 )
             )

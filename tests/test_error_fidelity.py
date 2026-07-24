@@ -737,7 +737,8 @@ class ModelStateTests(unittest.TestCase):
             self.NumberOfElements = FakeProperty(elements)
             self.NumberOfNodes = FakeProperty(nodes)
 
-    def _root(self, elements=240, material=True, phases=2, model=True, status="Up to date"):
+    def _root(self, elements=240, material=True, phases=2, model=True, status="Up to date",
+              placeholder=False):
         root = type("Root", (object,), {})()
         if model:
             model_object = FakeObject("Model")
@@ -750,10 +751,17 @@ class ModelStateTests(unittest.TestCase):
             FakePhase("Phase_%d" % index) for index in range(1, phases)
         ]
         plate = FakeObject("Plate_1", type_name="Plate")
-        if material:
-            plate.Material = FakeReference(FakeObject("PlateMat_1"))
-        else:
+        if not material:
             plate.Material = FakeProperty(None)
+        elif placeholder:
+            # A material created with no properties: PLAXIS leaves its
+            # identification as the placeholder token and rejects it at
+            # calculate.
+            plate.Material = FakeReference(
+                FakeObject("PlateMat_2", identification="<NoName>")
+            )
+        else:
+            plate.Material = FakeReference(FakeObject("PlateMat_1", identification="Deck"))
         root.Plates = [plate]
         return root
 
@@ -831,6 +839,31 @@ class ModelStateTests(unittest.TestCase):
 
         self.assertIn("Plate_1", " ".join(result["result"]["blocking"]))
         self.assertEqual(result["result"]["unassigned_materials"]["count"], 1)
+
+    def test_a_placeholder_material_is_blocking_and_named(self):
+        """The closed calculate blocker was a material created with no
+        properties -- PLAXIS answered `Invalid material "<NoName> [PlateMat_2]"`.
+        model_state now catches it before the wasted calculate, which an
+        unassigned-materials check cannot: the material is present, just
+        unconfigured."""
+
+        result = call(input_runtime(self._root(placeholder=True)), "model_state")["result"]
+
+        self.assertEqual(result["unassigned_materials"]["count"], 0)
+        self.assertEqual(result["unassigned_materials"]["placeholder_count"], 1)
+        self.assertEqual(
+            result["unassigned_materials"]["placeholder_features"][0]["material"], "PlateMat_2"
+        )
+        joined = " ".join(result["blocking"])
+        self.assertIn("Plate_1->PlateMat_2", joined)
+        self.assertIn("never configured", joined)
+        self.assertFalse(result["calculable"])
+
+    def test_a_configured_material_is_not_flagged_as_placeholder(self):
+        result = call(input_runtime(self._root()), "model_state")["result"]
+
+        self.assertEqual(result["unassigned_materials"]["placeholder_count"], 0)
+        self.assertTrue(result["calculable"])
 
     def test_a_model_with_only_the_initial_phase_is_named(self):
         result = call(input_runtime(self._root(phases=1)), "model_state")
