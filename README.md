@@ -9,7 +9,7 @@ exposed as tools, over a hardened Windows-local stdio server.
 
 <br>
 
-[![release](https://img.shields.io/badge/release-v0.3.3-00E5A0?style=flat-square&labelColor=0D1117)](https://github.com/yixuanzhong/PLAXIS-MCP/releases)
+[![release](https://img.shields.io/badge/release-v0.3.4-00E5A0?style=flat-square&labelColor=0D1117)](https://github.com/yixuanzhong/PLAXIS-MCP/releases)
 [![python](https://img.shields.io/badge/host-CPython%203.13-3776AB?style=flat-square&logo=python&logoColor=white&labelColor=0D1117)](#requirements)
 [![mcp](https://img.shields.io/badge/MCP-1.26.0-5A45FF?style=flat-square&labelColor=0D1117)](https://github.com/modelcontextprotocol/python-sdk)
 [![transport](https://img.shields.io/badge/transport-stdio-8B949E?style=flat-square&labelColor=0D1117)](#security-model)

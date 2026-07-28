@@ -537,9 +537,105 @@ class DerivedPropertyTests(unittest.TestCase):
             self.assertTrue(result["ok"], (path, result))
         self.assertEqual(zone.writes, ["Top", "Top"])
 
+
+class LayerLevelZonePropertyTests(unittest.TestCase):
+    """A soil layer's Top/Bottom/Thickness are per-zone lists, so a layer-level
+    write raises PLAXIS's "'PlxObjectPropertyList' object has no attribute
+    '__set__'" -- an internal type name and no way forward. Measured through
+    Caros: eleven calls permuting the four properties across two layers and two
+    tools, ending in a project reset that crashed PLAXIS."""
+
+    class Zone:
+        def __init__(self):
+            self.Top = FakeProperty(0.0)
+            self.Bottom = FakeProperty(-5.0)
+
+    def _runtime(self):
+        layer = FakeObject("Soillayer_1", type_name="Soillayer")
+        # The live shape: the layer-level member is a list, one entry per zone.
+        layer.Top = FakeProperty([0.0])
+        layer.Bottom = FakeProperty([-1.0])
+        layer.Thickness = FakeProperty([1.0])
+        layer.top_manual = FakeProperty([0.0])
+        layer.Zones = [self.Zone()]
+
+        class Root:
+            def __init__(self):
+                self.Soillayer_1 = layer
+                self.Soillayers = [layer]
+
+        return input_runtime(Root())
+
+    def test_a_layer_level_write_names_the_zone_path_that_works(self):
+        result = call(self._runtime(), "set_property", path="Soillayer_1.Top", value=0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "INVALID_PATH")
+        self.assertIn("Soillayer_1.Zones[0].Top", result["error"]["message"])
+        self.assertIn("per-zone list", result["error"]["message"])
+
+    def test_every_per_zone_property_the_agent_tried_is_covered(self):
+        """Top, Bottom, Thickness and top_manual all failed identically live;
+        catching only Top would just move the thrash one property along."""
+
+        runtime = self._runtime()
+        for prop in ("Top", "Bottom", "Thickness", "top_manual"):
+            result = call(runtime, "set_property", path="Soillayer_%s.%s" % (1, prop), value=1)
+            self.assertEqual(result["error"]["code"], "INVALID_PATH", prop)
+            self.assertIn("Soillayer_1.Zones[0].%s" % prop, result["error"]["message"])
+
+    def test_the_indexed_layer_spelling_is_covered_too(self):
+        result = call(self._runtime(), "set_property", path="Soillayers[0].Thickness", value=5)
+
+        self.assertEqual(result["error"]["code"], "INVALID_PATH")
+        self.assertIn("Soillayers[0].Zones[0].Thickness", result["error"]["message"])
+
+    def test_the_method_spelling_of_the_same_write_is_caught(self):
+        """After set_property refused it, the agent moved to call_method."""
+
+        runtime = self._runtime()
+        result = call(
+            runtime, "call_method", path="Soillayer_1", method="set", args=["Bottom", -5]
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Soillayer_1.Zones[0].Bottom", result["error"]["message"])
+
+    def test_calling_a_method_on_the_property_list_is_caught(self):
+        result = call(self._runtime(), "call_method", path="Soillayer_1.Top", method="set", args=[0])
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Soillayer_1.Zones[0].Top", result["error"]["message"])
+
+    def test_a_zone_level_write_still_goes_through(self):
+        """The guard must not swallow the spelling it is recommending."""
+
+        runtime = self._runtime()
+        result = call(runtime, "set_property", path="Soillayer_1.Zones[0].Top", value=-1.0)
+
+        self.assertTrue(result["ok"], result)
+
+    def test_unrelated_properties_and_objects_are_untouched(self):
+        runtime = self._runtime()
+
+        self.assertTrue(call(runtime, "set_property", path="Soillayer_1.Name", value="x")["ok"])
+        self.assertIsNone(
+            WorkerRuntime._per_zone_property_message(["Plate_1", "Top"]),
+            "only a provable soil layer may trigger the rule",
+        )
+
+    def test_an_unprovable_layer_spelling_still_reaches_plaxis(self):
+        """Same contract as the derived-Top rule: what the path cannot prove
+        goes to PLAXIS, whose own answer is legible."""
+
+        self.assertIsNone(WorkerRuntime._per_zone_property_message(["SomeLayer", "Top"]))
+        self.assertIsNone(WorkerRuntime._per_zone_property_message(["Borehole_1", "Top"]))
+
     def test_a_writable_neighbour_property_is_untouched_by_the_rule(self):
-        runtime, zone = self._runtime()
-        result = call(runtime, "set_property", path="Soillayer_2.Zones[0].Bottom", value=-6.0)
+        """Bottom on a zone is the write the message recommends; it must work."""
+
+        runtime = self._runtime()
+        result = call(runtime, "set_property", path="Soillayer_1.Zones[0].Bottom", value=-6.0)
 
         self.assertTrue(result["ok"], result)
 

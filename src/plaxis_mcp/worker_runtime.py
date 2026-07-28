@@ -977,6 +977,56 @@ class WorkerRuntime(object):
                 return not cls._TOPMOST_LAYER_NAME.match(token)
         return False
 
+    _LAYER_NAME = re.compile(r"^Soillayer_\d+$")
+    # A soil layer carries one entry per borehole zone for each of these, so the
+    # layer-level member is a PlxObjectPropertyList rather than a value. Read live off
+    # list_members on a V22 Soillayer, not from the object-reference doc.
+    _PER_ZONE_LAYER_PROPERTIES = ("Top", "Bottom", "Thickness", "top_manual")
+
+    @classmethod
+    def _names_a_soil_layer(cls, tokens):
+        """Whether `tokens` provably ends at a soil layer object."""
+
+        if not tokens:
+            return False
+        last = tokens[-1]
+        if isinstance(last, str):
+            return bool(cls._LAYER_NAME.match(last))
+        return len(tokens) >= 2 and tokens[-2] == "Soillayers"
+
+    @classmethod
+    def _per_zone_property_message(cls, tokens):
+        """Name the zone a layer-level geometry write is missing (WP-D).
+
+        `Soillayer_1.Top` reads back as `[0]` -- one entry per borehole zone --
+        and assigning to it raises PLAXIS's "'PlxObjectPropertyList' object has
+        no attribute '__set__'", which names the internal type and no way
+        forward. Measured live: an agent that hit it spent eleven calls
+        permuting Top/Bottom/Thickness/top_manual across two layers, in both
+        set_property and call_method spellings, then reset the project.
+
+        Narrow on purpose, like the derived-Top rule below: it fires only where
+        the path proves it ends at a soil layer and names no zone of its own.
+        """
+
+        if not tokens or tokens[-1] not in cls._PER_ZONE_LAYER_PROPERTIES:
+            return None
+        owner = tokens[:-1]
+        if any(token == "Zones" for token in owner) or not cls._names_a_soil_layer(owner):
+            return None
+        return (
+            "`%(path)s` is a per-zone list, not a single value: a soil layer holds one "
+            "%(prop)s per borehole zone. Set it on the zone instead -- "
+            "`%(layer)s.Zones[0].%(prop)s` -- and list_members on `%(layer)s.Zones` shows "
+            "how many zones there are. Below the topmost layer a zone's Top is derived "
+            "from the zone above it, so set `Bottom` or `Thickness` there."
+            % {
+                "path": render_path(tokens),
+                "prop": tokens[-1],
+                "layer": render_path(owner),
+            }
+        )
+
     @classmethod
     def _derived_property_message(cls, tokens):
         """Name the domain rule behind a property PLAXIS computes (WP-D).
@@ -1022,6 +1072,9 @@ class WorkerRuntime(object):
         derived_message = self._derived_property_message(tokens)
         if derived_message is not None:
             raise WorkerError("READ_ONLY_PROPERTY", derived_message)
+        per_zone_message = self._per_zone_property_message(tokens)
+        if per_zone_message is not None:
+            raise WorkerError("INVALID_PATH", per_zone_message)
         target = global_object
         for token in tokens[:-1]:
             try:
@@ -1090,6 +1143,17 @@ class WorkerRuntime(object):
                     "first-class tool for that command, or pass an object's `path` string to "
                     "a tool that takes references." % index,
                 )
+        # The same layer-level geometry write, spelled as a method call. Live, an agent
+        # that had exhausted set_property moved straight to `Soillayer_1.set("Bottom", -5)`
+        # and `Soillayer_1.Top.set(0)`; PLAXIS answers those with "Invalid parameters" and
+        # "no attribute 'set'", neither of which names the zone it is missing.
+        per_zone_message = self._per_zone_property_message(parse_path(path)) or (
+            self._per_zone_property_message(parse_path(path) + [args[0]])
+            if method == "set" and args and isinstance(args[0], str)
+            else None
+        )
+        if per_zone_message is not None:
+            raise WorkerError("INVALID_PATH", per_zone_message)
         target = resolve_path(global_object, path)
         try:
             callable_member = getattr(target, method)
