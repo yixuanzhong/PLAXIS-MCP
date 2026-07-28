@@ -3,7 +3,7 @@
   "name": "io.github.yixuanzhong/plaxis-mcp",
   "title": "PLAXIS",
   "description": "Windows-local MCP server for PLAXIS 2D Remote Scripting: geometry, staged construction, results.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "websiteUrl": "https://github.com/yixuanzhong/PLAXIS-MCP#readme",
   "repository": {
     "url": "https://github.com/yixuanzhong/PLAXIS-MCP",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "plaxis-mcp",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

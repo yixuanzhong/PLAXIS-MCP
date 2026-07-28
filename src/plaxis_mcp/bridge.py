@@ -530,6 +530,13 @@ class WorkerBridge:
                 continue
             environment[str(key)] = str(value)
         environment["PLAXIS_ROLE"] = self.config.role
+        # Base directory for resolving relative save/open paths. A client that
+        # launches this server sets its working directory as our cwd (goose and
+        # Caros do), so a bare "model.p2dx" lands where the user is working
+        # rather than in PLAXIS's own cwd. An explicit PLAXIS_PROJECT_DIR passed
+        # through the extension's env wins over this default.
+        if not environment.get("PLAXIS_PROJECT_DIR"):
+            environment["PLAXIS_PROJECT_DIR"] = os.getcwd()
         return environment
 
     def _remember_secrets(self, value: Any, key: str = "") -> None:

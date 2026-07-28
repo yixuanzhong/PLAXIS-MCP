@@ -1111,8 +1111,23 @@ class WorkerRuntime(object):
             raise vendor_error("PLAXIS_ERROR", "PLAXIS could not create a new project.", exc)
         return {"action": "new_project", "result": describe_value(result)}
 
+    @staticmethod
+    def _resolve_project_path(filename):
+        # Absolute paths pass through unchanged. A relative path resolves
+        # against PLAXIS_PROJECT_DIR -- the MCP host's launch directory, which a
+        # client sets to its working/session directory -- so a bare filename
+        # saves where the user is working instead of in PLAXIS's own cwd. The
+        # resolved absolute path is what PLAXIS receives and what the caller is
+        # told, so it always learns where the file actually went.
+        if os.path.isabs(filename):
+            return filename
+        base = os.environ.get("PLAXIS_PROJECT_DIR")
+        if not base:
+            return filename
+        return os.path.normpath(os.path.join(base, filename))
+
     def _open_project(self, server, params):
-        filename = self._required_string(params, "filename")
+        filename = self._resolve_project_path(self._required_string(params, "filename"))
         # Opening a path that does not exist did not raise: it reported a
         # successful open of a file that was never there. The worker runs on
         # the PLAXIS host, so this is the same filesystem PLAXIS would read.
@@ -1144,6 +1159,8 @@ class WorkerRuntime(object):
         filename = params.get("filename")
         if filename is not None and (not isinstance(filename, str) or not filename):
             raise WorkerError("INVALID_ARGUMENT", "PLAXIS save filename must be a non-empty string when supplied.")
+        if filename is not None:
+            filename = self._resolve_project_path(filename)
         # PLAXIS exposes a single "save" command that takes an optional target
         # path. There is no "saveas": calling it raised, and every save to a new
         # path failed with a generic error.

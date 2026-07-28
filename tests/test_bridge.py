@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import time
 import unittest
@@ -450,6 +451,35 @@ class BridgeTests(unittest.TestCase):
 
         self.assertNotIn("do-not-log-me", str(raised.exception))
         self.assertIn("[REDACTED]", str(raised.exception))
+
+    def test_worker_environment_defaults_project_dir_to_launch_cwd(self) -> None:
+        session = self.make_session()
+        self.addCleanup(session.close)
+        environment = session._bridge._worker_environment()
+        self.assertEqual(environment["PLAXIS_PROJECT_DIR"], os.getcwd())
+
+    def test_worker_environment_keeps_an_explicit_project_dir_override(self) -> None:
+        patcher = patch.object(
+            BridgeSessionConfig,
+            "trusted_script_roots",
+            lambda _self: (Path(__file__).parent.resolve(),),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        session = BridgeSession(
+            BridgeSessionConfig(
+                worker_python=sys.executable,
+                worker_script=str(Path(__file__).resolve()),
+                worker_args=("--fake-worker",),
+                role="input",
+                password="pw",
+                startup_timeout=2.0,
+                request_timeout=2.0,
+                environment={"PLAXIS_PROJECT_DIR": r"D:\Projects\Site"},
+            )
+        )
+        self.addCleanup(session.close)
+        self.assertEqual(session._bridge._worker_environment()["PLAXIS_PROJECT_DIR"], r"D:\Projects\Site")
 
     def test_timeout_marks_session_uncertain_and_stops_worker(self) -> None:
         session = self.make_session()

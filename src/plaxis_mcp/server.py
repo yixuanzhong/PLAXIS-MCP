@@ -707,7 +707,13 @@ def create_server(
 
         @server.tool(annotations=_PROJECT_MUTATOR, structured_output=True)
         def open_project(filename: Annotated[StrictStr, Field(min_length=1)]) -> dict[str, Any]:
-            """Open an approved PLAXIS project path."""
+            """Open a PLAXIS project.
+
+            An absolute path is used as given; a relative path (a bare filename)
+            resolves against the working directory, so "model.p2dx" opens the
+            project in the directory the session was started in. The result
+            reports the resolved absolute path.
+            """
 
             return _invoke(session, "open_project", filename=filename)
 
@@ -727,7 +733,14 @@ def create_server(
         def save_project(
             filename: Annotated[StrictStr | None, Field(min_length=1)] = None,
         ) -> dict[str, Any]:
-            """Save the active project, optionally to an approved new path."""
+            """Save the active project, optionally to a new path.
+
+            Omit filename to save the open project in place. An absolute
+            filename is used as given; a relative one (a bare "model.p2dx")
+            saves into the working directory the session was started in, not
+            PLAXIS's own directory. The result reports the resolved absolute
+            path.
+            """
 
             return _invoke(session, "save_project", filename=filename)
 
