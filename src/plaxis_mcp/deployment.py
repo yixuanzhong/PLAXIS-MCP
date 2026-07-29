@@ -33,6 +33,7 @@ _SECRET_FIELD_MARKERS = ("password", "secret", "token", "credential_blob")
 # kept because ``credential_target`` is derived from it.
 INSTALL_DIRECTORY_PARTS = ("Caros", "PLAXIS-MCP")
 PROFILE_DIRECTORY_NAME = "profiles"
+HIDDEN_INPUT_HINT = "(input is deliberately hidden, press Enter key to continue)"
 
 
 class DeploymentError(RuntimeError):
@@ -755,6 +756,140 @@ class WindowsCredentialStore:
             raise CredentialStoreUnavailable("Windows Credential Manager could not remove the PLAXIS password.")
 
 
+class _TcpRowOwnerPid(ctypes.Structure):
+    _fields_ = [
+        ("dwState", ctypes.c_uint32),
+        ("dwLocalAddr", ctypes.c_uint32),
+        ("dwLocalPort", ctypes.c_uint32),
+        ("dwRemoteAddr", ctypes.c_uint32),
+        ("dwRemotePort", ctypes.c_uint32),
+        ("dwOwningPid", ctypes.c_uint32),
+    ]
+
+
+# TCP_TABLE_OWNER_PID_LISTENER: listeners only, with the owning process.
+_TCP_TABLE_OWNER_PID_LISTENER = 3
+_AF_INET = 2
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_LOOPBACK_ADDRESSES = frozenset((0x0100007F, 0x00000000))  # 127.0.0.1 and 0.0.0.0, network order
+
+
+def _listening_ports_by_pid() -> dict[int, list[int]]:
+    """Map each owning process id to the loopback TCP ports it listens on.
+
+    Read from the OS, never by connecting. Discovering a port by probing it
+    would mean sending the PLAXIS password to whatever answers -- the exact
+    disclosure ``_endpoint_identity_error`` exists to catch after the fact.
+    """
+
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return {}
+    api = ctypes.windll.iphlpapi
+    size = ctypes.c_uint32(0)
+    # First call sizes the buffer; ERROR_INSUFFICIENT_BUFFER is expected.
+    api.GetExtendedTcpTable(
+        None, ctypes.byref(size), False, _AF_INET, _TCP_TABLE_OWNER_PID_LISTENER, 0
+    )
+    if size.value == 0:
+        return {}
+    buffer = ctypes.create_string_buffer(size.value)
+    if api.GetExtendedTcpTable(
+        buffer, ctypes.byref(size), False, _AF_INET, _TCP_TABLE_OWNER_PID_LISTENER, 0
+    ) != 0:
+        return {}
+    count = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint32)).contents.value
+    rows = ctypes.cast(
+        ctypes.addressof(buffer) + ctypes.sizeof(ctypes.c_uint32),
+        ctypes.POINTER(_TcpRowOwnerPid * count),
+    ).contents
+    ports: dict[int, list[int]] = {}
+    for row in rows:
+        if row.dwLocalAddr not in _LOOPBACK_ADDRESSES:
+            continue
+        # dwLocalPort carries the port in network byte order in its low word.
+        port = ((row.dwLocalPort & 0xFF) << 8) | ((row.dwLocalPort >> 8) & 0xFF)
+        if 1 <= port <= 65535:
+            ports.setdefault(int(row.dwOwningPid), []).append(port)
+    return ports
+
+
+def _process_image_path(pid: int) -> Path | None:
+    """Resolve one pid's executable, or None when it cannot be read."""
+
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return None
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        # A process owned by another user (a service running as SYSTEM) is not
+        # readable without elevation. Unknown is not PLAXIS, so it is skipped.
+        return None
+    try:
+        length = ctypes.c_uint32(32768)
+        buffer = ctypes.create_unicode_buffer(length.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)):
+            return None
+        return Path(buffer.value)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def discover_role_ports(installation_root: Path | str, role: object) -> list[int]:
+    """Find the loopback ports a running PLAXIS of this role is listening on.
+
+    Only processes whose executable lives under ``installation_root`` count, so
+    a second PLAXIS installation cannot capture this profile's connection, and
+    the role is taken from the executable name (``...Input.exe`` /
+    ``...Output.exe``) because the two roles are separate programs.
+    """
+
+    normalised = _normalise_role(role)
+    try:
+        root = Path(installation_root).expanduser().resolve()
+    except (OSError, TypeError, ValueError):
+        return []
+    found: set[int] = set()
+    for pid, ports in _listening_ports_by_pid().items():
+        image = _process_image_path(pid)
+        if image is None:
+            continue
+        try:
+            resolved = image.resolve()
+        except OSError:
+            continue
+        if not resolved.is_relative_to(root):
+            continue
+        if normalised not in resolved.stem.lower():
+            continue
+        found.update(ports)
+    return sorted(found)
+
+
+def set_profile_port(path: Path | str, port: int) -> EndpointProfile:
+    """Repin one generated profile to a different port, in place.
+
+    Only the port line is touched: every other field, including the derived
+    credential target, has to keep binding the profile to its installation.
+    """
+
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ProfileError("PLAXIS profile port must be an integer from 1 through 65535.")
+    profile_path = Path(path).expanduser()
+    original = profile_path.read_text(encoding="utf-8")
+    updated, replacements = re.subn(
+        r"(?m)^port\s*=.*$", "port = %d" % port, original, count=1
+    )
+    if replacements != 1:
+        raise ProfileError("PLAXIS profile does not contain a port setting to update.")
+    profile_path.write_text(updated, encoding="utf-8")
+    try:
+        return load_profile(profile_path)
+    except ProfileError:
+        # Never leave a profile the server can no longer load.
+        profile_path.write_text(original, encoding="utf-8")
+        raise
+
+
 def _target_from_args(parser: argparse.ArgumentParser, namespace: argparse.Namespace) -> str:
     if namespace.profile:
         # Removing a stored password must keep working after PLAXIS has been
@@ -803,8 +938,11 @@ def _store_role_password(
     """Prompt twice with hidden input and store one role password."""
 
     label = "Input" if target.endswith("/input") else "Output"
-    password = getpass("PLAXIS %s password: " % label)
-    confirmation = getpass("Confirm password: ")
+    # Hidden input looks like a frozen terminal: nothing echoes, not even
+    # asterisks, so an operator cannot tell typing from a hang. Both prompts
+    # carry the note, because the confirmation is where the doubt returns.
+    password = getpass("PLAXIS %s password %s: " % (label, HIDDEN_INPUT_HINT))
+    confirmation = getpass("Confirm password %s: " % HIDDEN_INPUT_HINT)
     if not password:
         parser.error("Password must not be empty.")
     if password != confirmation:

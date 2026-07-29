@@ -7,11 +7,24 @@ what was wrong, and none of it reached the caller.
 """
 
 import asyncio
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from plaxis_mcp.bridge import WorkerOperationError
-from plaxis_mcp.server import PlaxisRole, ServerConfig, create_server
+from plaxis_mcp.bridge import (
+    IDENTITY_PROBE_TIMEOUT_SECONDS,
+    BridgeSession,
+    BridgeSessionConfig,
+    WorkerOperationError,
+)
+from plaxis_mcp.server import (
+    PlaxisRole,
+    ServerConfig,
+    _bridge_error_result,
+    _connect_session,
+    create_server,
+)
 from plaxis_mcp.worker_runtime import (
     CONNECT_ATTEMPTS,
     WorkerError,
@@ -1092,6 +1105,418 @@ class ListObjectsTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("Plates", result["error"]["message"])
+
+
+class StalePortCorrectionTests(unittest.TestCase):
+    """A pinned port that PLAXIS has moved away from failed every connect, and
+    where another local service had taken the port, every attempt re-sent the
+    password to it before the peer was identified. The pin is corrected to the
+    port a running PLAXIS of this role actually owns, found in the OS process
+    table rather than by probing, so discovery itself connects to nothing."""
+
+    class _Session:
+        """A bridge-shaped session that only accepts one port.
+
+        ``names`` is what each port answers to an identity probe, mirroring the
+        live V22 reading where one Input process held both the scripting port
+        and an unrelated websocket port.
+        """
+
+        def __init__(self, working_port, error, names=None):
+            self.config = BridgeSessionConfig(
+                worker_python="python", role="input", port=10000
+            )
+            self._working_port = working_port
+            self._error = error
+            self._names = (
+                names
+                if names is not None
+                else {working_port: "PLAXIS 2D Input/22.2.0.1078"}
+            )
+            self.attempts = []
+            self.identified = []
+
+        def invoke(self, operation, **params):
+            return None
+
+        def identify(self, port):
+            self.identified.append(port)
+            return {"port": port, "active": True, "server_full_name": self._names.get(port)}
+
+        def connect(self):
+            self.attempts.append(self.config.port)
+            if self.config.port != self._working_port:
+                raise self._error
+            return {"connected": True, "state": "connected"}
+
+    def _config(self, root, profile_path=None):
+        return ServerConfig(
+            role=PlaxisRole.INPUT,
+            port=10000,
+            installation_root=str(root),
+            profile_path=None if profile_path is None else str(profile_path),
+        )
+
+    def _dead_port(self):
+        return WorkerOperationError(
+            "CONNECTION_FAILED", "Nothing is listening", retryable=False
+        )
+
+    def test_the_pin_moves_to_the_port_plaxis_actually_owns(self):
+        session = self._Session(10007, self._dead_port())
+        config = self._config("C:/plaxis")
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]):
+            result = _connect_session(session, config)
+
+        self.assertEqual(session.attempts, [10000, 10007])
+        self.assertEqual(result["port_correction"]["previous_port"], 10000)
+        self.assertEqual(result["port_correction"]["port"], 10007)
+        # The corrected port has to be what status reports, not the stale pin.
+        self.assertEqual(config.port, 10007)
+
+    def test_a_squatted_port_reports_the_password_as_exposed(self):
+        wrong_endpoint = WorkerOperationError(
+            "WRONG_ENDPOINT", "not a PLAXIS scripting server", retryable=False
+        )
+        session = self._Session(10007, wrong_endpoint)
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]):
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        correction = result["port_correction"]
+        self.assertTrue(correction["credential_exposed"])
+        self.assertIn("rotate it", correction["detail"])
+
+    def test_a_dead_port_correction_claims_no_exposure(self):
+        session = self._Session(10007, self._dead_port())
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]):
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertFalse(result["port_correction"]["credential_exposed"])
+        self.assertNotIn("exposed", result["port_correction"]["detail"])
+
+    def test_the_identity_probe_does_not_inherit_the_full_connect_budget(self):
+        """connect_timeout buys patience for a PLAXIS that is busy after
+        new_project. Identifying a peer needs none of it, and spending that
+        budget twice would make a silent port hang the session far longer than
+        the connect it precedes."""
+
+        session = BridgeSession(
+            BridgeSessionConfig(
+                worker_python="python", role="input", port=10000, connect_timeout=30.0
+            )
+        )
+
+        with patch.object(session, "_bridge") as bridge:
+            bridge.request.return_value = {"server_full_name": "PLAXIS 2D Input"}
+            session.identify(10000)
+
+        self.assertEqual(
+            bridge.request.call_args[0][1]["timeout"], IDENTITY_PROBE_TIMEOUT_SECONDS
+        )
+
+    def test_a_squatted_pinned_port_never_receives_the_password(self):
+        """The disclosure the post-connect check could only report after the
+        fact is refused before the handshake instead."""
+
+        session = self._Session(
+            10003,
+            self._dead_port(),
+            names={10000: "Qualys-Correlation", 10003: "PLAXIS 2D Input/22.2.0.1078"},
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10003]):
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        # 10000 was identified but never connected to.
+        self.assertNotIn(10000, session.attempts)
+        self.assertEqual(result["port_correction"]["port"], 10003)
+
+    def test_a_refusal_before_the_handshake_claims_no_disclosure(self):
+        """Rotating a password nobody received is wasted alarm."""
+
+        session = self._Session(
+            10003,
+            self._dead_port(),
+            names={10000: "Qualys-Correlation", 10003: "PLAXIS 2D Input/22.2.0.1078"},
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10003]):
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        correction = result["port_correction"]
+        self.assertFalse(correction["credential_exposed"])
+        self.assertNotIn("exposed", correction["detail"])
+
+    def test_an_unidentifiable_pinned_port_is_still_connected_to(self):
+        """A busy PLAXIS cannot answer a probe either. Treating silence as a
+        mismatch would defeat the connect retry that WP-I added."""
+
+        session = self._Session(10000, self._dead_port(), names={})
+
+        with patch("plaxis_mcp.server.discover_role_ports") as discover:
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [10000])
+        self.assertTrue(result["connected"])
+        discover.assert_not_called()
+
+    def test_a_build_that_omits_the_role_word_still_connects(self):
+        """The pinned-port check rejects only an explicit contradiction; a name
+        without the role word is not proof of a mismatch."""
+
+        session = self._Session(10000, self._dead_port(), names={10000: "PLAXIS 2D V22"})
+
+        result = _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [10000])
+        self.assertTrue(result["connected"])
+
+    def test_the_other_roles_endpoint_is_refused_without_sending_the_password(self):
+        session = self._Session(
+            10000, self._dead_port(), names={10000: "PLAXIS 2D Output/22.2.0.1078"}
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[]):
+            with self.assertRaises(WorkerOperationError) as raised:
+                _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [])
+        self.assertEqual(raised.exception.code, "WRONG_ENDPOINT")
+        self.assertIn("No password was sent", str(raised.exception))
+
+    def test_a_correction_is_still_reported_when_the_retry_fails(self):
+        """Live on V22: the pin moved 10000 -> 10003 and the reconnect then
+        failed on a stale password. The raised error has to say the profile
+        changed, or the operator is left with a silently rewritten pin."""
+
+        class _AlwaysFails(self._Session):
+            def connect(self):
+                self.attempts.append(self.config.port)
+                if self.config.port == 10000:
+                    raise WorkerOperationError(
+                        "CONNECTION_FAILED", "Nothing is listening", retryable=False
+                    )
+                raise WorkerOperationError(
+                    "AUTHENTICATION_FAILED", "rejected the stored password"
+                )
+
+        session = _AlwaysFails(10003, self._dead_port())
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10003]):
+            with self.assertRaises(WorkerOperationError) as raised:
+                _connect_session(session, self._config("C:/plaxis"))
+
+        message = str(raised.exception)
+        self.assertIn("rejected the stored password", message)
+        self.assertIn("repinned", message)
+        self.assertIn("10003", message)
+        self.assertEqual(raised.exception.code, "AUTHENTICATION_FAILED")
+
+    def test_a_busy_plaxis_keeps_its_port(self):
+        """Retryable means the endpoint is right and PLAXIS is slow. Moving the
+        pin there would abandon a working port over a timing artefact."""
+
+        busy = WorkerOperationError("CONNECTION_FAILED", "did not answer", retryable=True)
+        session = self._Session(10007, busy)
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]) as probe:
+            with self.assertRaises(WorkerOperationError):
+                _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [10000])
+        probe.assert_not_called()
+
+    def test_the_scripting_port_is_picked_out_of_the_processs_other_ports(self):
+        """Measured on PLAXIS 2D V22: one Input process listened on 10003
+        ("PLAXIS 2D Input/22.2.0.1078") and 10141 ("sgcWebSockets 4.0.2").
+        Owning the process is not what makes a port the scripting server."""
+
+        session = self._Session(
+            10003,
+            self._dead_port(),
+            names={10003: "PLAXIS 2D Input/22.2.0.1078", 10141: "sgcWebSockets 4.0.2"},
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10003, 10141]):
+            result = _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(result["port_correction"]["port"], 10003)
+        self.assertEqual(session.attempts, [10000, 10003])
+
+    def test_the_real_password_only_reaches_a_port_that_named_itself(self):
+        """Identity comes first; the connect that carries the password happens
+        only against a port that already answered as this role's PLAXIS."""
+
+        session = self._Session(
+            10003,
+            self._dead_port(),
+            names={10003: "PLAXIS 2D Input/22.2.0.1078", 10141: "sgcWebSockets 4.0.2"},
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10141, 10003]):
+            _connect_session(session, self._config("C:/plaxis"))
+
+        # The pinned port is probed first, then each candidate; the password
+        # goes only to the one that named itself.
+        self.assertEqual(session.identified, [10000, 10141, 10003])
+        self.assertNotIn(10141, session.attempts)
+
+    def test_a_port_that_names_the_other_role_is_not_taken(self):
+        session = self._Session(
+            10003,
+            self._dead_port(),
+            names={10003: "PLAXIS 2D Output/22.2.0.1078"},
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10003]):
+            with self.assertRaises(WorkerOperationError):
+                _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [10000])
+
+    def test_two_running_endpoints_are_left_to_the_operator(self):
+        """Choosing between them would be choosing which one gets the password."""
+
+        session = self._Session(
+            10007,
+            self._dead_port(),
+            names={
+                10007: "PLAXIS 2D Input/22.2.0.1078",
+                10008: "PLAXIS 2D Input/22.2.0.1078",
+            },
+        )
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007, 10008]):
+            with self.assertRaises(WorkerOperationError):
+                _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(session.attempts, [10000])
+
+    def test_no_running_plaxis_leaves_the_original_failure_intact(self):
+        session = self._Session(10007, self._dead_port())
+
+        with patch("plaxis_mcp.server.discover_role_ports", return_value=[]):
+            with self.assertRaises(WorkerOperationError) as raised:
+                _connect_session(session, self._config("C:/plaxis"))
+
+        self.assertEqual(raised.exception.code, "CONNECTION_FAILED")
+
+    def test_the_correction_is_written_back_to_the_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "input.toml"
+            profile.write_text(
+                'schema_version = 1\nrole = "input"\nport = 10000\nhost = "127.0.0.1"\n',
+                encoding="utf-8",
+            )
+            session = self._Session(10007, self._dead_port())
+
+            with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]):
+                with patch("plaxis_mcp.server.set_profile_port") as write:
+                    result = _connect_session(
+                        session, self._config("C:/plaxis", profile)
+                    )
+
+            write.assert_called_once_with(str(profile), 10007)
+            self.assertTrue(result["port_correction"]["profile_updated"])
+
+    def test_an_unwritable_profile_still_connects_and_says_it_is_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "input.toml"
+            session = self._Session(10007, self._dead_port())
+
+            with patch("plaxis_mcp.server.discover_role_ports", return_value=[10007]):
+                with patch(
+                    "plaxis_mcp.server.set_profile_port", side_effect=OSError("read-only")
+                ):
+                    result = _connect_session(
+                        session, self._config("C:/plaxis", profile)
+                    )
+
+            correction = result["port_correction"]
+            self.assertFalse(correction["profile_updated"])
+            self.assertIn("this session only", correction["detail"])
+            self.assertIn("--input-port 10007", correction["detail"])
+
+
+class RejectedPasswordTests(unittest.TestCase):
+    """A rejected password named the problem and no remedy, so the agent
+    invented one and asked the user to send the PLAXIS password in the chat.
+    That discloses it to the transcript and the model provider, and it cannot
+    even work: connect takes no password argument, and the password is read
+    from Windows Credential Manager. Both roles are pinned the same way, so
+    both must carry the same remedy."""
+
+    class _RejectsEveryRead:
+        """The global object of a session the server refuses to decrypt for."""
+
+        def __getattr__(self, name):
+            raise RuntimeError("the server failed to decrypt the request")
+
+    def _connect(self, role):
+        def factory(**kwargs):
+            server = FakeServer()
+            server.server_full_name = "PLAXIS 2D %s V22" % role.title()
+            return server, self._RejectsEveryRead()
+
+        runtime = WorkerRuntime(role=role, new_server_factory=factory)
+        return runtime.handle_request(
+            {
+                "protocol": 1,
+                "id": 1,
+                "operation": "connect",
+                "params": {
+                    "host": "127.0.0.1",
+                    "port": 10000,
+                    "password": "pw",
+                    "timeout": 5,
+                },
+            }
+        )
+
+    def test_each_role_is_told_the_command_that_replaces_its_own_password(self):
+        for role in ("input", "output"):
+            with self.subTest(role=role):
+                result = self._connect(role)
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "AUTHENTICATION_FAILED")
+                message = result["error"]["message"]
+                self.assertIn(
+                    "plaxis-mcp credentials set --profile %s.toml" % role, message
+                )
+                self.assertIn("hidden input", message)
+
+    def test_neither_role_leaves_room_to_offer_the_chat_as_the_channel(self):
+        for role in ("input", "output"):
+            with self.subTest(role=role):
+                message = self._connect(role)["error"]["message"]
+
+                self.assertIn("Do not ask anyone to type the password", message)
+                self.assertIn("takes no password argument", message)
+
+    def test_the_tool_payload_carries_the_remedy_for_both_roles(self):
+        for role in (PlaxisRole.INPUT, PlaxisRole.OUTPUT):
+            with self.subTest(role=role):
+                error = WorkerOperationError(
+                    "AUTHENTICATION_FAILED", "rejected", state="disconnected"
+                )
+
+                result = _bridge_error_result(error, None, ServerConfig(role=role))
+
+                remediation = result.structuredContent["remediation"]
+                self.assertIn("plaxis-mcp credentials set --profile", remediation)
+                self.assertIn("%s.toml" % role.value, remediation)
+                self.assertIn("Never request the password in chat", remediation)
+
+    def test_an_unrelated_failure_carries_no_credential_advice(self):
+        error = WorkerOperationError("TIMEOUT", "too slow", state="uncertain")
+
+        result = _bridge_error_result(error, None, ServerConfig(role=PlaxisRole.INPUT))
+
+        self.assertNotIn("remediation", result.structuredContent)
 
 
 class ConnectionHonestyTests(unittest.TestCase):

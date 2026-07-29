@@ -38,11 +38,14 @@ from .deployment import (
     CredentialStore,
     CredentialStoreUnavailable,
     EndpointProfile,
+    ProfileError,
     WindowsCredentialStore,
     credentials_main,
+    discover_role_ports,
     load_profile,
     profile_path_for_role,
     profiles_main,
+    set_profile_port,
     setup_main,
 )
 
@@ -88,6 +91,9 @@ class ServerConfig:
     worker_python: str | None = None
     runtime_profile: str = "unconfigured"
     installation_root: str | None = None
+    # Where this config was loaded from, so a corrected port can be written
+    # back. None for an environment-built config, which has no file to repin.
+    profile_path: str | None = None
 
     def __post_init__(self) -> None:
         host = self.host.strip()
@@ -237,6 +243,7 @@ def server_config_from_profile(
     profile: EndpointProfile,
     *,
     credential_store: CredentialStore | None = None,
+    profile_path: Path | str | None = None,
 ) -> ServerConfig:
     """Build an immutable endpoint config from a generated, secret-free profile."""
 
@@ -245,7 +252,11 @@ def server_config_from_profile(
     try:
         password = (credential_store or WindowsCredentialStore()).read(profile.credential_target)
     except CredentialStoreUnavailable as exc:
-        raise ServerConfigurationError("The stored PLAXIS password could not be read.") from exc
+        raise ServerConfigurationError(
+            "The stored PLAXIS password could not be read. Run `plaxis-mcp credentials "
+            "set --target %s` in a terminal to store it; it prompts with hidden input "
+            "and never takes the password on the command line." % profile.credential_target
+        ) from exc
     return ServerConfig(
         role=PlaxisRole(profile.role),
         host=profile.host,
@@ -256,6 +267,7 @@ def server_config_from_profile(
         worker_python=str(profile.worker_python),
         runtime_profile=profile.runtime_profile,
         installation_root=str(profile.installation_root),
+        profile_path=None if profile_path is None else str(profile_path),
     )
 
 
@@ -310,11 +322,235 @@ def _construct_session(
     return session_factory(config)
 
 
+def _names_this_role(server_full_name: Any, role: str) -> bool:
+    """Require the peer to name itself as this role's PLAXIS scripting server.
+
+    Stricter than the post-connect endpoint check on purpose. That check
+    validates a port the operator chose and so tolerates a build that omits the
+    role word; this one is choosing between ports, and an unnamed candidate is
+    not evidence -- it is the thing being decided.
+    """
+
+    if not isinstance(server_full_name, str):
+        return False
+    name = server_full_name.lower()
+    return "plaxis" in name and role in name
+
+
+def _contradicts_this_role(server_full_name: Any, role: str) -> bool:
+    """True only when a peer's own name rules out this role's PLAXIS.
+
+    Deliberately permissive, matching the worker's post-connect check: a build
+    that omits the role word is not proof of a mismatch, and a port that cannot
+    be identified at all is not evidence of anything. Only an explicit
+    contradiction may stop a connect the operator configured.
+    """
+
+    if not isinstance(server_full_name, str) or not server_full_name.strip():
+        return False
+    name = server_full_name.lower()
+    if "plaxis" not in name:
+        return True
+    opposite = "output" if role == "input" else "input"
+    return opposite in name and role not in name
+
+
+def _refuse_unidentified_endpoint(session: Any, config: ServerConfig) -> None:
+    """Withhold the password from a pinned port that is not this role's PLAXIS.
+
+    The scripting handshake sends the password before the peer identifies
+    itself, so the post-connect endpoint check can only report a disclosure
+    that already happened -- it is how a service answering as
+    "Qualys-Correlation" came to be handed a PLAXIS password. Identity is
+    served unauthenticated, so asking first costs one round trip and turns that
+    disclosure into a refusal.
+
+    Silence is not a contradiction: a PLAXIS that is merely busy cannot answer
+    a probe either, and treating that as a mismatch would defeat the connect
+    retry that exists because a failed connect once had an agent inventing
+    results. An unidentifiable port falls through to the normal connect.
+    """
+
+    identify = getattr(session, "identify", None)
+    if not callable(identify):
+        return
+    try:
+        answer = identify(config.port)
+    except BridgeError:
+        return
+    if not isinstance(answer, Mapping):
+        return
+    name = answer.get("server_full_name")
+    if not _contradicts_this_role(name, config.role.value):
+        return
+    error = WorkerOperationError(
+        "WRONG_ENDPOINT",
+        "The service on %s:%s identified itself as %s, which is not the PLAXIS %s "
+        "scripting server this profile is pinned to. No password was sent to it."
+        % (config.host, config.port, name, config.role.value),
+        state="disconnected",
+    )
+    # Records that this refusal happened before the handshake, so a correction
+    # built on it does not tell the operator to rotate an undisclosed password.
+    error.password_sent = False
+    raise error
+
+
+def _scripting_ports_among(session: Any, ports: list[int], role: str) -> list[int]:
+    """Keep only the ports that identify as this role's scripting server."""
+
+    identify = getattr(session, "identify", None)
+    if not callable(identify):
+        return []
+    identified = []
+    for port in ports:
+        try:
+            answer = identify(port)
+        except BridgeError:
+            continue
+        if not isinstance(answer, Mapping):
+            continue
+        if _names_this_role(answer.get("server_full_name"), role):
+            identified.append(port)
+    return identified
+
+
+def _correct_pinned_port(
+    session: Any,
+    config: ServerConfig,
+    error: BridgeError,
+) -> dict[str, Any] | None:
+    """Repin this role to the port its own PLAXIS is actually listening on.
+
+    A stale pin is not merely a failed connect. The scripting handshake sends
+    the password before the peer identifies itself, so every attempt against a
+    port some other local service has taken discloses the password again -- the
+    disclosure ``_endpoint_identity_error`` records, where an endpoint answering
+    as "Qualys-Correlation" was accepted as a healthy PLAXIS connection.
+    Correcting the pin ends that repetition.
+
+    The candidate comes from the OS process table and never from probing: it is
+    a port owned by a running PLAXIS executable of this role, under this
+    profile's own installation root. Nothing is connected to in order to find
+    it, so discovery itself can disclose nothing. A password still only ever
+    reaches a process that was identified first, and the worker's own endpoint
+    check still runs afterwards.
+    """
+
+    if not isinstance(error, WorkerOperationError) or error.retryable:
+        return None
+    # A busy or slow PLAXIS is retryable and keeps its port; only a dead port
+    # or a peer that is not this role's PLAXIS is a pin worth moving.
+    if error.code not in ("CONNECTION_FAILED", "WRONG_ENDPOINT"):
+        return None
+    if not config.installation_root:
+        return None
+    candidates = [
+        port
+        for port in discover_role_ports(config.installation_root, config.role.value)
+        if port != config.port
+    ]
+    if not candidates:
+        return None
+    # Owning the process is not enough. Measured on PLAXIS 2D V22, one Input
+    # process held both 10003 ("PLAXIS 2D Input/22.2.0.1078") and 10141
+    # ("sgcWebSockets 4.0.2"); only the second step tells them apart.
+    candidates = _scripting_ports_among(session, candidates, config.role.value)
+    # One identified scripting endpoint, or the operator decides. Guessing
+    # between two would be guessing which one receives the password.
+    if len(candidates) != 1:
+        return None
+
+    port = candidates[0]
+    previous_port = config.port
+    session_config = getattr(session, "config", None)
+    if session_config is None:
+        return None
+    session_config.port = port
+    # ServerConfig is frozen against accidental mutation, but a corrected pin
+    # has to be visible everywhere the config is read -- connection_status
+    # reports config.port, and reporting the abandoned port would be a lie.
+    object.__setattr__(config, "port", port)
+
+    correction: dict[str, Any] = {
+        "previous_port": previous_port,
+        "port": port,
+        "profile_updated": False,
+        # Only a handshake that actually reached the wrong peer discloses
+        # anything. A refusal raised before the password was sent must not send
+        # the operator off to rotate a password nobody received.
+        "credential_exposed": (
+            error.code == "WRONG_ENDPOINT" and getattr(error, "password_sent", True)
+        ),
+    }
+    if config.profile_path:
+        try:
+            set_profile_port(config.profile_path, port)
+            correction["profile_updated"] = True
+        except (OSError, ProfileError):
+            # An uncorrected file is not a failed connect: the session is on
+            # the right port either way, and the next start re-detects.
+            correction["profile_updated"] = False
+    correction["detail"] = _describe_port_correction(correction, config)
+    return correction
+
+
+def _describe_port_correction(correction: Mapping[str, Any], config: ServerConfig) -> str:
+    """State what moved, what it means, and what the operator still has to do."""
+
+    lines = [
+        "The pinned PLAXIS %s port %s was wrong; this installation's %s is listening "
+        "on %s, so the connection was repinned to it."
+        % (
+            config.role.value,
+            correction["previous_port"],
+            config.role.value,
+            correction["port"],
+        )
+    ]
+    if correction["profile_updated"]:
+        lines.append("The profile now records port %s." % correction["port"])
+    else:
+        lines.append(
+            "The profile could not be updated, so this correction lasts for this "
+            "session only. Make it permanent with `plaxis-mcp setup --%s-port %s "
+            "--skip-credentials`." % (config.role.value, correction["port"])
+        )
+    if correction["credential_exposed"]:
+        lines.append(
+            "A different service was answering on port %s and the scripting handshake "
+            "had already sent the password to it. Treat this endpoint's password as "
+            "exposed and rotate it in PLAXIS, then store the new one with "
+            "`plaxis-mcp credentials set`." % correction["previous_port"]
+        )
+    return " ".join(lines)
+
+
 def _connect_session(session: Any, config: ServerConfig) -> dict[str, Any]:
     """Connect a bridge zero-argument session or a temporary legacy fake."""
 
     if isinstance(session, BridgeSession) or callable(getattr(session, "invoke", None)):
-        return session.connect()
+        try:
+            _refuse_unidentified_endpoint(session, config)
+            return session.connect()
+        except BridgeError as error:
+            correction = _correct_pinned_port(session, config, error)
+            if correction is None:
+                raise
+            try:
+                result = session.connect()
+            except BridgeError as retry_error:
+                # The pin moved even though the connect went on to fail for an
+                # unrelated reason. Staying silent would leave the operator
+                # with a changed profile and an error that never mentions it.
+                retry_error.args = (
+                    "%s %s" % (str(retry_error), correction["detail"]),
+                )
+                raise
+            if isinstance(result, Mapping):
+                result = dict(result)
+                result["port_correction"] = correction
+            return result
     return session.connect(**config.connection_kwargs())
 
 
@@ -452,6 +688,23 @@ def _safe_error_state(session: Any, config: ServerConfig) -> str:
         return "uncertain"
 
 
+def _credential_remediation(config: ServerConfig) -> str:
+    """Name the only channel that can replace a rejected password."""
+
+    try:
+        profile = str(profile_path_for_role(config.role.value))
+    except Exception:
+        # A missing LOCALAPPDATA must not cost the caller the advice itself.
+        profile = "%s.toml" % config.role.value
+    return (
+        "Run `plaxis-mcp credentials set --profile %s` in a terminal a person is typing "
+        "at -- the prompt reads the console directly, so an agent's shell hangs instead "
+        "of failing. It prompts with hidden input and stores the password in Windows "
+        "Credential Manager. Never request the password in chat or as a tool argument."
+        % profile
+    )
+
+
 def _bridge_error_result(
     error: BridgeError,
     session: Any,
@@ -493,6 +746,12 @@ def _bridge_error_result(
     details = getattr(error, "details", None)
     if details:
         payload["details"] = details
+    # A rejected password has no in-session remedy, and an agent left to invent
+    # one offered to accept the password in chat -- disclosing it to the
+    # transcript and the model provider, and uselessly, since connect takes no
+    # password argument. Carry the one channel that works.
+    if code == "AUTHENTICATION_FAILED":
+        payload["remediation"] = _credential_remediation(config)
     return mcp_types.CallToolResult(
         content=[mcp_types.TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))],
         structuredContent=payload,
@@ -1012,6 +1271,10 @@ def _normalized_status_after(result: Any, session: Any, config: ServerConfig) ->
         # Only connect sets this, so disconnect's shape is unchanged.
         if "recovered_from_uncertain" in result:
             normalized["recovered_from_uncertain"] = bool(result["recovered_from_uncertain"])
+        # A connect that had to move the pin says so: the port in this result is
+        # not the one the operator configured, and it may carry a disclosure.
+        if "port_correction" in result:
+            normalized["port_correction"] = result["port_correction"]
         return normalized
     return _normalized_status(session, config)
 
@@ -1100,7 +1363,9 @@ def main(argv: list[str] | None = None) -> int:
             "No PLAXIS-MCP profile at %s. Run `plaxis-mcp setup` once on this machine."
             % profile_path
         )
-    return _run_stdio(server_config_from_profile(load_profile(profile_path)))
+    return _run_stdio(
+        server_config_from_profile(load_profile(profile_path), profile_path=profile_path)
+    )
 
 
 if __name__ == "__main__":

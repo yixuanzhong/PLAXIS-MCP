@@ -47,6 +47,11 @@ _SECRET_MARKERS = ("PASSWORD", "SECRET", "TOKEN", "CREDENTIAL", "API_KEY")
 # cannot time out mid-retry.
 CONNECT_ATTEMPTS = 3
 CONNECT_BACKOFF_SECONDS = (0.5, 1.5)
+# Sent by `identify` in place of the endpoint's real password. The scripting
+# handshake transmits whatever password it is given before the peer names
+# itself, so identifying a port with the real one would disclose it to whatever
+# is listening -- which is the failure the identity check exists to catch.
+IDENTITY_PROBE_PASSWORD = "plaxis-mcp-identity-probe"
 # Signatures of a server that exists but is not answering yet. Matched on text
 # as well as exception class name because plxscripting wraps its HTTP client's
 # errors and the class reaching us differs across releases.
@@ -595,6 +600,8 @@ class WorkerRuntime(object):
                 result = self.status()
             elif operation == "connect":
                 result = self.connect(params)
+            elif operation == "identify":
+                result = self.identify(params)
             elif operation == "disconnect":
                 result = self.disconnect()
             elif operation == "call":
@@ -699,7 +706,17 @@ class WorkerRuntime(object):
             self._drop_session("AUTHENTICATION_FAILED")
             raise WorkerError(
                 "AUTHENTICATION_FAILED",
-                "The PLAXIS scripting server rejected the stored password for this endpoint.",
+                "The PLAXIS scripting server rejected the stored password for this "
+                "endpoint. Only the operator at this machine can replace it: running "
+                "`plaxis-mcp credentials set --profile %s.toml` in a real terminal "
+                "prompts with hidden input and writes to Windows Credential Manager. It "
+                "has to be a terminal a person is typing at -- the prompt reads the "
+                "console directly, so running it from an agent's shell hangs rather "
+                "than failing. Do not ask "
+                "anyone to type the password into the chat. The connect tool takes no "
+                "password argument, so a password sent that way cannot be used to "
+                "connect -- it would only be recorded in the transcript and sent to the "
+                "model provider." % self.role,
             )
         return result
 
@@ -768,6 +785,50 @@ class WorkerRuntime(object):
             "reported. No model data was read, and it is not known whether retrying helps."
             % (host, port)
         )
+
+    def identify(self, params):
+        """Name the service on a port without sending this endpoint's password.
+
+        Measured live on PLAXIS 2D V22: one running PLAXIS Input process holds
+        several loopback ports -- 10003 answered as "PLAXIS 2D Input/22.2.0.1078"
+        and 10141 as "sgcWebSockets 4.0.2" -- so owning the process proves the
+        port is PLAXIS's, not that it is the scripting server. Only the peer's
+        own name separates them.
+
+        ``server_full_name`` and ``active`` are served unauthenticated, which
+        the same measurement confirmed by reading both with a deliberately
+        wrong password. So the probe sends a throwaway constant and the real
+        password stays unsent until a port has identified itself.
+        """
+
+        host = self._required_string(params, "host")
+        port = self._required_port(params)
+        timeout = self._optional_number(params, "timeout")
+        factory = self._new_server_factory or self._load_new_server()
+        server = None
+        try:
+            server, _ = factory(
+                address=host,
+                port=port,
+                timeout=timeout,
+                request_timeout=timeout,
+                password=IDENTITY_PROBE_PASSWORD,
+            )
+            return {
+                "host": host,
+                "port": port,
+                "active": self._safe_attestation_value(read_member_value(server, "active")),
+                "server_full_name": self._safe_attestation_value(
+                    read_member_value(server, "server_full_name")
+                ),
+            }
+        except Exception:
+            # A port that cannot be identified is simply not a candidate; the
+            # caller is choosing between ports, not diagnosing this one.
+            return {"host": host, "port": port, "active": None, "server_full_name": None}
+        finally:
+            if server is not None:
+                self._close_session(server)
 
     @staticmethod
     def _authentication_failed(global_object):

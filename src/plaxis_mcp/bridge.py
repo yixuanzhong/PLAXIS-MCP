@@ -26,6 +26,11 @@ from .deployment import RuntimeProfileError, linked_worker_pythons, validate_wor
 # does not pull any PLAXIS SDK into the host interpreter.
 from .worker_runtime import connect_deadline
 
+# Ceiling for one identity probe. Measured on PLAXIS 2D V22 a live endpoint
+# answers in well under a second, so this only bounds the pathological case: a
+# port that accepts a connection and then says nothing.
+IDENTITY_PROBE_TIMEOUT_SECONDS = 5.0
+
 
 PROTOCOL_VERSION = 1
 
@@ -614,6 +619,27 @@ class BridgeSession:
         # anything; a failed reconnect must leave it standing.
         connected["recovered_from_uncertain"] = self._bridge.clear_session_uncertainty()
         return connected
+
+    def identify(self, port: int) -> dict[str, Any]:
+        """Ask the worker what is listening on a port, sending no real password.
+
+        Capped well below ``connect_timeout``. That budget exists so a connect
+        can outwait a PLAXIS that is busy after new_project; identifying a peer
+        needs no such patience, and spending the full budget twice would make a
+        silent port cost the operator a minute of apparent hang before the
+        connect that carries the real retry policy even begins.
+        """
+
+        self._bridge.start()
+        probe_timeout = min(self.config.connect_timeout, IDENTITY_PROBE_TIMEOUT_SECONDS)
+        return self._require_object_result(
+            self._bridge.request(
+                "identify",
+                {"host": self.config.host, "port": port, "timeout": probe_timeout},
+                timeout=connect_deadline(probe_timeout, self.config.startup_timeout),
+            ),
+            "identify",
+        )
 
     def disconnect(self) -> dict[str, Any]:
         if not self._bridge.started:

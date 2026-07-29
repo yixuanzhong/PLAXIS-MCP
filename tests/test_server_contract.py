@@ -347,7 +347,9 @@ class ServerContractTests(unittest.TestCase):
                                 main(["serve", "--role", "input", "--profile-dir", directory]), 0
                             )
             load.assert_called_once_with(profile_path)
-            build.assert_called_once_with(load.return_value)
+            # The path travels with the profile: a corrected port has to be
+            # written back to the file this role was actually launched from.
+            build.assert_called_once_with(load.return_value, profile_path=profile_path)
             run.assert_called_once_with(build.return_value)
 
     def test_serve_role_defaults_to_the_shared_profiles_directory(self):

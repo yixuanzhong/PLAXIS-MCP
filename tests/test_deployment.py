@@ -24,6 +24,7 @@ from plaxis_mcp.deployment import (
     profile_path_for_role,
     runtime_profile_for_python,
     select_installation,
+    set_profile_port,
     setup_main,
     validate_worker_attestation,
     write_role_profiles,
@@ -113,6 +114,39 @@ class DeploymentTests(unittest.TestCase):
                 host="127.0.0.1", port=10000,
                 credential_target=credential_target_for(Path("C:/PLAXIS/OTHER"), "input"),
             )
+
+    @unittest.skipIf(sys.version_info < (3, 11), "Profile parsing needs stdlib tomllib (3.11+).")
+    def test_repinning_the_port_changes_nothing_else_in_the_profile(self):
+        """A corrected port must not loosen the installation binding that keeps
+        one install's stored password from reaching another."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            installation = self._fake_installation(Path(temporary) / "V22")
+            written = write_role_profiles(Path(temporary), installation)
+            before = load_profile(written["input"])
+
+            after = set_profile_port(written["input"], 10007)
+
+            self.assertEqual(after.port, 10007)
+            self.assertEqual(after.credential_target, before.credential_target)
+            self.assertEqual(after.worker_python, before.worker_python)
+            self.assertEqual(after.installation_root, before.installation_root)
+            self.assertEqual(load_profile(written["input"]).port, 10007)
+            text = written["input"].read_text(encoding="utf-8")
+            self.assertNotIn("password =", text.lower())
+
+    @unittest.skipIf(sys.version_info < (3, 11), "Profile parsing needs stdlib tomllib (3.11+).")
+    def test_a_rejected_port_leaves_the_profile_exactly_as_it_was(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            installation = self._fake_installation(Path(temporary) / "V22")
+            written = write_role_profiles(Path(temporary), installation)
+            original = written["input"].read_text(encoding="utf-8")
+
+            for rejected in (0, 70000, True, "10007"):
+                with self.assertRaises(ProfileError):
+                    set_profile_port(written["input"], rejected)
+
+            self.assertEqual(written["input"].read_text(encoding="utf-8"), original)
 
     @unittest.skipIf(sys.version_info < (3, 11), "Profile parsing needs stdlib tomllib (3.11+).")
     def test_worker_python_must_be_linked_to_the_installation_root(self):
