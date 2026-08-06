@@ -19,7 +19,7 @@ from pathlib import Path
 import sys
 from typing import Annotated, Any, Callable, Literal, Mapping, TypeAlias
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp import types as mcp_types
 from mcp.types import ToolAnnotations
 from pydantic import ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -660,18 +660,12 @@ _VIEW_RESULTS = ToolAnnotations(
 )
 
 
-def _set_version(server: FastMCP) -> None:
-    # The Python SDK does not expose a public constructor argument for the
-    # protocol server-info version in this release.
-    server._mcp_server.version = __version__
-
-
-def _lock_input_schemas(server: FastMCP) -> None:
+def _lock_input_schemas(server: MCPServer) -> None:
     """Make the SDK-generated argument models reject unknown properties.
 
-    FastMCP 1.26 deliberately uses permissive Pydantic argument models. The
-    deployed contract is stricter: every advertised tool schema is closed, so
-    old and new clients receive the same invalid-argument behavior.
+    MCPServer (mcp 2.0) deliberately uses permissive Pydantic argument models.
+    The deployed contract is stricter: every advertised tool schema is closed,
+    so old and new clients receive the same invalid-argument behavior.
     """
 
     for tool in server._tool_manager._tools.values():
@@ -760,7 +754,7 @@ def _bridge_error_result(
 
 
 def _install_bridge_error_handlers(
-    server: FastMCP,
+    server: MCPServer,
     session: Any,
     config: ServerConfig,
 ) -> None:
@@ -779,11 +773,11 @@ def _install_bridge_error_handlers(
         tool.fn = guarded
 
 
-def _worker_lifespan(session: Any) -> Callable[[FastMCP], Any]:
+def _worker_lifespan(session: Any) -> Callable[[MCPServer], Any]:
     """Ensure stdin EOF and server shutdown cannot orphan a worker process."""
 
     @asynccontextmanager
-    async def lifespan(_: FastMCP):
+    async def lifespan(_: MCPServer):
         try:
             yield
         finally:
@@ -798,21 +792,22 @@ def create_server(
     config: ServerConfig | None = None,
     *,
     session_factory: Callable[..., Any] | None = None,
-) -> FastMCP:
-    """Create a role-specific FastMCP server without importing PLAXIS SDKs."""
+) -> MCPServer:
+    """Create a role-specific MCPServer server without importing PLAXIS SDKs."""
 
     config = config or load_server_config()
     session = _construct_session(config, session_factory)
-    server = FastMCP(
+    server = MCPServer(
         "plaxis-mcp",
+        # mcp 2.0 exposes the reported server-info version as a constructor
+        # argument, so the old private poke into _mcp_server.version is gone.
+        version=__version__,
         instructions=(
             "Connect only to the pinned local PLAXIS %s endpoint. "
             "Require client approval before mutation tools."
         ) % config.role.value,
-        json_response=True,
         lifespan=_worker_lifespan(session),
     )
-    _set_version(server)
     # Intentionally private, testable attachment. It does not contain a
     # serializable MCP resource and should never be surfaced to clients.
     server._plaxis_config = config
@@ -1279,7 +1274,7 @@ def _normalized_status_after(result: Any, session: Any, config: ServerConfig) ->
     return _normalized_status(session, config)
 
 
-mcp: FastMCP | None = None
+mcp: MCPServer | None = None
 
 
 def _run_stdio(config: ServerConfig) -> int:
