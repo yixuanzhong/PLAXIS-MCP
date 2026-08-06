@@ -9,9 +9,9 @@ exposed as tools, over a hardened Windows-local stdio server.
 
 <br>
 
-[![release](https://img.shields.io/badge/release-v0.3.5-00E5A0?style=flat-square&labelColor=0D1117)](https://github.com/yixuanzhong/PLAXIS-MCP/releases)
+[![release](https://img.shields.io/badge/release-v0.4.0-00E5A0?style=flat-square&labelColor=0D1117)](https://github.com/yixuanzhong/PLAXIS-MCP/releases)
 [![python](https://img.shields.io/badge/host-CPython%203.13-3776AB?style=flat-square&logo=python&logoColor=white&labelColor=0D1117)](#requirements)
-[![mcp](https://img.shields.io/badge/MCP-1.26.0-5A45FF?style=flat-square&labelColor=0D1117)](https://github.com/modelcontextprotocol/python-sdk)
+[![mcp](https://img.shields.io/badge/MCP-2.0.0-5A45FF?style=flat-square&labelColor=0D1117)](https://github.com/modelcontextprotocol/python-sdk)
 [![transport](https://img.shields.io/badge/transport-stdio-8B949E?style=flat-square&labelColor=0D1117)](#security-model)
 [![platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square&logo=windows&logoColor=white&labelColor=0D1117)](#requirements)
 [![tools](https://img.shields.io/badge/tools-34%20input%20%C2%B7%2011%20output-00E5A0?style=flat-square&labelColor=0D1117)](#tools)
@@ -24,6 +24,14 @@ exposed as tools, over a hardened Windows-local stdio server.
 </div>
 
 ---
+
+## ▸ v0.4 — MCP 2026-07-28 edition
+
+| | |
+| --- | --- |
+| **Built on `mcp` 2.0** | The host now runs on the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 2.0 series, which implements the `2026-07-28` specification edition. FastMCP is retired in favour of `MCPServer`; the tool surface, closed argument schemas and `isError` fault contract are unchanged. |
+| **Stateless-era protocol** | `2026-07-28` makes the protocol stateless and is negotiated over Streamable HTTP. This server is stdio-only, so it advertises the SDK's latest handshake revision (`2025-11-25`) and stays on the local-pipe transport its security model depends on. |
+| **Same local contract** | No client reconfiguration: every conforming local stdio MCP client connects to the same unprefixed tools exactly as before. |
 
 ## ▸ v0.3 — set up once, launch from anywhere
 
@@ -193,7 +201,7 @@ The generic [`mcp-client-config.json`](examples/mcp-client-config.json) is a min
 PLAXIS-MCP separates the MCP host from PLAXIS's vendor-managed Python runtime:
 
 ```
-  MCP client  ──stdio──▶  host (CPython 3.13, mcp 1.26.0)
+  MCP client  ──stdio──▶  host (CPython 3.13, mcp 2.0.0)
                               │
                               ├─ private local pipe
                               ▼

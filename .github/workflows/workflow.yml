@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: python -m pip install "mcp[cli]==1.26.0"
+      - run: python -m pip install "mcp[cli]==2.0.0"
       - name: Run the unit suite
         # There is no tests/__init__.py, so discovery has to start inside tests/.
         working-directory: tests

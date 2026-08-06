@@ -300,10 +300,10 @@ class VendorMessagePassThroughTests(unittest.TestCase):
         server = create_server(ServerConfig(role=PlaxisRole.INPUT), session_factory=Session)
         result = asyncio.run(server.call_tool("calculate", {}))
 
-        self.assertTrue(result.isError)
-        self.assertEqual(result.structuredContent["plaxis_message"], "Phase_2 did not converge")
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["plaxis_message"], "Phase_2 did not converge")
         self.assertEqual(
-            result.structuredContent["details"]["phases"][0]["status"], "Failed"
+            result.structured_content["details"]["phases"][0]["status"], "Failed"
         )
 
 
@@ -415,7 +415,7 @@ class SchemaBoundaryTests(unittest.TestCase):
     def _schema(self, name):
         server, _ = self._server()
         tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
-        return tools[name].inputSchema
+        return tools[name].input_schema
 
     def test_set_property_advertises_scalars_only(self):
         types = {
@@ -445,8 +445,8 @@ class SchemaBoundaryTests(unittest.TestCase):
         tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
 
         for name in ("list_objects", "model_state"):
-            self.assertTrue(tools[name].annotations.readOnlyHint, name)
-            self.assertFalse(tools[name].annotations.destructiveHint, name)
+            self.assertTrue(tools[name].annotations.read_only_hint, name)
+            self.assertFalse(tools[name].annotations.destructive_hint, name)
 
 
 class MaterialReferenceRoutingTests(unittest.TestCase):
@@ -1506,7 +1506,7 @@ class RejectedPasswordTests(unittest.TestCase):
 
                 result = _bridge_error_result(error, None, ServerConfig(role=role))
 
-                remediation = result.structuredContent["remediation"]
+                remediation = result.structured_content["remediation"]
                 self.assertIn("plaxis-mcp credentials set --profile", remediation)
                 self.assertIn("%s.toml" % role.value, remediation)
                 self.assertIn("Never request the password in chat", remediation)
@@ -1516,7 +1516,7 @@ class RejectedPasswordTests(unittest.TestCase):
 
         result = _bridge_error_result(error, None, ServerConfig(role=PlaxisRole.INPUT))
 
-        self.assertNotIn("remediation", result.structuredContent)
+        self.assertNotIn("remediation", result.structured_content)
 
 
 class ConnectionHonestyTests(unittest.TestCase):

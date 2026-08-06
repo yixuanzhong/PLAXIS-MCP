@@ -12,7 +12,7 @@ from plaxis_mcp.deployment import (
     credential_target_for,
     default_profile_directory,
 )
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 from plaxis_mcp.server import (
     PlaxisRole,
     ServerConfig,
@@ -140,18 +140,18 @@ class ServerContractTests(unittest.TestCase):
                 "get_single_result",
             },
         )
-        self.assertTrue(input_tools["inspect"].annotations.readOnlyHint)
-        self.assertTrue(input_tools["set_property"].annotations.destructiveHint)
-        self.assertTrue(input_tools["call_method"].annotations.openWorldHint)
-        self.assertEqual(input_tools["connect"].inputSchema["properties"], {})
-        self.assertTrue(all(tool.inputSchema["additionalProperties"] is False for tool in input_tools.values()))
-        self.assertTrue(input_tools["close_project"].annotations.idempotentHint)
-        self.assertTrue(input_tools["save_project"].annotations.idempotentHint)
+        self.assertTrue(input_tools["inspect"].annotations.read_only_hint)
+        self.assertTrue(input_tools["set_property"].annotations.destructive_hint)
+        self.assertTrue(input_tools["call_method"].annotations.open_world_hint)
+        self.assertEqual(input_tools["connect"].input_schema["properties"], {})
+        self.assertTrue(all(tool.input_schema["additionalProperties"] is False for tool in input_tools.values()))
+        self.assertTrue(input_tools["close_project"].annotations.idempotent_hint)
+        self.assertTrue(input_tools["save_project"].annotations.idempotent_hint)
 
     def test_role_resource_and_pinned_legacy_connect(self):
         server, session = self.make_server(PlaxisRole.INPUT)
 
-        _, result = asyncio.run(server.call_tool("connect", {}))
+        result = asyncio.run(server.call_tool("connect", {})).structured_content
         resource_uris = {str(resource.uri) for resource in asyncio.run(server.list_resources())}
 
         self.assertTrue(result["connected"])
@@ -175,7 +175,7 @@ class ServerContractTests(unittest.TestCase):
     def test_output_result_pagination_is_forwarded(self):
         server, session = self.make_server(PlaxisRole.OUTPUT)
 
-        _, result = asyncio.run(
+        result = asyncio.run(
             server.call_tool(
                 "get_results",
                 {
@@ -186,7 +186,7 @@ class ServerContractTests(unittest.TestCase):
                     "limit": 500,
                 },
             )
-        )
+        ).structured_content
 
         self.assertEqual(result["operation"], "get_results")
         self.assertEqual(
@@ -240,9 +240,9 @@ class ServerContractTests(unittest.TestCase):
         )
         result = asyncio.run(server.call_tool("list_phases", {}))
 
-        self.assertTrue(result.isError)
-        self.assertEqual(result.structuredContent["code"], "WRONG_ROLE")
-        self.assertEqual(result.structuredContent["state"], "connected")
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["code"], "WRONG_ROLE")
+        self.assertEqual(result.structured_content["state"], "connected")
 
     def test_error_handler_binds_each_tools_own_function_not_a_shared_closure(self):
         """_install_bridge_error_handlers wraps every tool's fn in the same
@@ -270,10 +270,10 @@ class ServerContractTests(unittest.TestCase):
         )
         calculate_result = asyncio.run(server.call_tool("calculate", {}))
 
-        self.assertTrue(activate_result.isError)
-        self.assertEqual(activate_result.structuredContent["message"], "failed:activate")
-        self.assertTrue(calculate_result.isError)
-        self.assertEqual(calculate_result.structuredContent["message"], "failed:calculate")
+        self.assertTrue(activate_result.is_error)
+        self.assertEqual(activate_result.structured_content["message"], "failed:activate")
+        self.assertTrue(calculate_result.is_error)
+        self.assertEqual(calculate_result.structured_content["message"], "failed:calculate")
 
     def test_generated_profile_uses_credential_store_not_environment(self):
         installation_root = Path(sys.executable).parent
