@@ -21,7 +21,7 @@ a = Analysis(
         (str(ROOT / "profiles"), "profiles"),
         (str(ROOT / "LICENSE"), "."),
     ],
-    hiddenimports=["mcp.server.fastmcp", "plaxis_mcp.bridge", "plaxis_mcp.deployment"],
+    hiddenimports=["mcp.server.mcpserver", "plaxis_mcp.bridge", "plaxis_mcp.deployment"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
